@@ -1,7 +1,7 @@
 import type { ContentBlock as MCPContentBlock } from "@modelcontextprotocol/sdk/types.js";
 import Debug from "debug";
 import { ContentBlockConverter as MCPContentBlockConverter } from "intellichat/mcp/ContentBlockConverter";
-import { updateMCPConnectionMeta } from "intellichat/services/NextChatService";
+import { registerMCPToolName, resolveMCPToolName } from "intellichat/services/NextChatService";
 import type { ITool } from "intellichat/readers/IChatReader";
 import OpenAIReader from "intellichat/readers/OpenAIReader";
 import type {
@@ -301,7 +301,10 @@ export default class OpenAIChatService extends NextChatService implements INextC
       const convertedBlocks = await Promise.all(
         content.map((block: MCPContentBlock) =>
           MCPContentBlockConverter.convert(block, (uri) => {
-            return window.electron.mcp.readResource(tool.name.split("--")[0], uri).then((result) => {
+            return window.electron.mcp.readResource(
+              resolveMCPToolName(tool.name)?.connectionId || "",
+              uri,
+            ).then((result) => {
               if (result.isError) {
                 return [];
               }
@@ -379,7 +382,9 @@ export default class OpenAIChatService extends NextChatService implements INextC
       if (tools) {
         for (const tool of tools.tools) {
           if (tool._connectionId) {
-            updateMCPConnectionMeta(tool._connectionId, {
+            registerMCPToolName(tool.name, {
+              connectionId: tool._connectionId,
+              toolName: tool._toolName,
               approvalPolicy: tool._approvalPolicy,
             });
           }

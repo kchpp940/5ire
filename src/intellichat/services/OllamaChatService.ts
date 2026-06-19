@@ -9,6 +9,7 @@ import { ITool } from 'intellichat/readers/IChatReader';
 import { splitByImg, stripHtmlTags, urlJoin } from 'utils/util';
 import { ContentBlockConverter as MCPContentBlockConverter } from 'intellichat/mcp/ContentBlockConverter';
 import { ContentBlock as MCPContentBlock } from '@modelcontextprotocol/sdk/types.js';
+import { resolveMCPToolName } from 'intellichat/services/NextChatService';
 import OpenAIChatService from './OpenAIChatService';
 import INextChatService from './INextCharService';
 import Ollama from '../../providers/Ollama';
@@ -115,7 +116,7 @@ export default class OllamaChatService
         content.map((block: MCPContentBlock) =>
           MCPContentBlockConverter.convert(block, (uri) => {
             return window.electron.mcp
-              .readResource(tool.name.split('--')[0], uri)
+              .readResource(resolveMCPToolName(tool.name)?.connectionId || "", uri)
               .then((result) => {
                 if (result.isError) {
                   return [];

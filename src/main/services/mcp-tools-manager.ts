@@ -352,14 +352,16 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
   async legacyList() {
     const bundles = Array.from(this.state.collections.entries()).map(([id, collection]) => {
       if (collection.status === "loaded") {
+        const shortIdPadded = collection.server.shortId.toString(16).padStart(2, "0");
         return {
           client: id,
           tools: collection.tools.map((tool) => {
             return {
               ...tool,
               ...{
-                name: `${id}--${tool.name}`,
+                name: `t_${shortIdPadded}--${tool.name}`,
                 _connectionId: id,
+                _toolName: tool.name,
                 _approvalPolicy: collection.server.approvalPolicy,
               },
             };

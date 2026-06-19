@@ -19,14 +19,25 @@ import { raiseError, stripHtmlTags } from 'utils/util';
 
 const debug = Debug('5ire:intellichat:NextChatService');
 
-const mcpConnectionMeta = new Map<string, { approvalPolicy?: string; type?: string }>();
+type MCPToolNameMeta = {
+  connectionId: string;
+  toolName: string;
+  approvalPolicy?: string;
+  type?: string;
+};
 
-export function updateMCPConnectionMeta(connectionId: string, meta: { approvalPolicy?: string; type?: string }) {
-  mcpConnectionMeta.set(connectionId, meta);
+const mcpToolNameMap = new Map<string, MCPToolNameMeta>();
+
+export function registerMCPToolName(safeName: string, meta: MCPToolNameMeta) {
+  mcpToolNameMap.set(safeName, meta);
 }
 
-export function getMCPConnectionMeta(connectionId: string) {
-  return mcpConnectionMeta.get(connectionId);
+export function resolveMCPToolName(safeName: string): MCPToolNameMeta | undefined {
+  return mcpToolNameMap.get(safeName);
+}
+
+export function clearMCPToolNameMap() {
+  mcpToolNameMap.clear();
 }
 
 export default abstract class NextCharService {
@@ -358,7 +369,34 @@ export default abstract class NextCharService {
         this.outputTokens += readResult.outputTokens;
       }
       if (readResult.tool) {
-        const [client, name] = readResult.tool.name.split('--');
+        const toolMeta = resolveMCPToolName(readResult.tool.name);
+
+        if (!toolMeta) {
+          const errorResult = {
+            isError: true,
+            content: [
+              {
+                error: `Unknown tool ${readResult.tool.name} - connection mapping not found`,
+                code: 'tool_not_found',
+                clientName: readResult.tool.name,
+                toolName: readResult.tool.name,
+              },
+            ],
+          };
+          const messagesWithTool = [
+            ...messages,
+            ...(await this.makeToolMessages(
+              readResult.tool,
+              errorResult,
+              readResult.content,
+            )),
+          ] as IChatRequestMessage[];
+          await this.chat(messagesWithTool);
+          return;
+        }
+
+        const client = toolMeta.connectionId;
+        const name = toolMeta.toolName;
         this.traceTool(chatId, name, '');
 
         // 生成唯一的请求ID
@@ -375,8 +413,7 @@ export default abstract class NextCharService {
         try {
           let toolCallsResult: any;
 
-          const serverMeta = mcpConnectionMeta.get(client);
-          const approvalPolicy = serverMeta?.approvalPolicy;
+          const approvalPolicy = toolMeta.approvalPolicy;
 
           const toolCallsCanclledResult = {
             isError: true,
@@ -395,7 +432,7 @@ export default abstract class NextCharService {
               case 'always': {
                 await MCPServerApprovalPolicyDialog.open({
                   toolName: client,
-                  toolType: serverMeta?.type,
+                  toolType: toolMeta.type,
                   methodName: name,
                   parameters: readResult.tool.args,
                 }).catch(() => {
@@ -410,7 +447,7 @@ export default abstract class NextCharService {
                 if (typeof isAllowed !== 'boolean') {
                   const allow = await MCPServerApprovalPolicyDialog.open({
                     toolName: client,
-                    toolType: serverMeta?.type,
+                    toolType: toolMeta.type,
                     methodName: name,
                     parameters: readResult.tool.args,
                   })

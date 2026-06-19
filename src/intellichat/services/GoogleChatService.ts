@@ -27,7 +27,7 @@ import GoogleReader from 'intellichat/readers/GoogleReader';
 import { ContentBlockConverter as MCPContentBlockConverter } from 'intellichat/mcp/ContentBlockConverter';
 import { ContentBlock as MCPContentBlock } from '@modelcontextprotocol/sdk/types.js';
 import { ITool } from 'intellichat/readers/IChatReader';
-import NextChatService, { updateMCPConnectionMeta } from './NextChatService';
+import NextChatService, { registerMCPToolName, resolveMCPToolName } from './NextChatService';
 import INextChatService from './INextCharService';
 
 const debug = Debug('5ire:intellichat:GoogleChatService');
@@ -90,7 +90,7 @@ export default class GoogleChatService
         content.map((block: MCPContentBlock) =>
           MCPContentBlockConverter.convert(block, (uri) => {
             return window.electron.mcp
-              .readResource(tool.name.split('--')[0], uri)
+              .readResource(resolveMCPToolName(tool.name)?.connectionId || "", uri)
               .then((result) => {
                 if (result.isError) {
                   return [];
@@ -374,7 +374,9 @@ export default class GoogleChatService
       if (tools) {
         for (const tool of tools.tools) {
           if (tool._connectionId) {
-            updateMCPConnectionMeta(tool._connectionId, {
+            registerMCPToolName(tool.name, {
+              connectionId: tool._connectionId,
+              toolName: tool._toolName,
               approvalPolicy: tool._approvalPolicy,
             });
           }
