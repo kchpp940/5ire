@@ -181,7 +181,7 @@ export default class AnthropicChatService extends NextChatService implements INe
           convertedBlocks.push(
             await MCPContentBlockConverter.convert(block, (uri) => {
               return window.electron.mcp.readResource(
-                this.resolveMCPToolName(tool.name)?.connectionId || "",
+                this.resolveMCPConnectionId(tool.name),
                 uri,
               ).then((result) => {
                 if (result.isError) {

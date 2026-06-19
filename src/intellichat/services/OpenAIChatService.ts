@@ -301,7 +301,7 @@ export default class OpenAIChatService extends NextChatService implements INextC
         content.map((block: MCPContentBlock) =>
           MCPContentBlockConverter.convert(block, (uri) => {
             return window.electron.mcp.readResource(
-              this.resolveMCPToolName(tool.name)?.connectionId || "",
+              this.resolveMCPConnectionId(tool.name),
               uri,
             ).then((result) => {
               if (result.isError) {
