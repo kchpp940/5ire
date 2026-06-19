@@ -93,8 +93,8 @@ export class DocumentManager {
       .execute();
 
     for (const doc of docs) {
-      await this.#documentEmbedder.cancelDocumentProcessing(doc.id).catch((error) => {
-        logger.error(`Failed to cancel processing for document ${doc.id}:`, error);
+      await this.#documentEmbedder.abortDocumentProcessingForDeletion(doc.id).catch((error) => {
+        logger.error(`Failed to abort processing for document ${doc.id}:`, error);
       });
     }
 
@@ -270,8 +270,8 @@ export class DocumentManager {
     const schema = this.#database.schema;
     const logger = this.#logger.scope("DeleteDocument");
 
-    await this.#documentEmbedder.cancelDocumentProcessing(options.id).catch((error) => {
-      logger.error(`Failed to cancel processing for document ${options.id}:`, error);
+    await this.#documentEmbedder.abortDocumentProcessingForDeletion(options.id).catch((error) => {
+      logger.error(`Failed to abort processing for document ${options.id}:`, error);
     });
 
     return client.transaction(async (tx) => {

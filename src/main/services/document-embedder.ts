@@ -156,6 +156,10 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
     return this.#cancelProcessingInternal(id, "cancelled");
   }
 
+  async abortDocumentProcessingForDeletion(id: string) {
+    return this.#cancelProcessingInternal(id, "deleted");
+  }
+
   async #process(id: string, url: string) {
     const logger = this.#logger.scope("Process");
     const controller = new AbortController();
