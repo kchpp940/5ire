@@ -14,7 +14,7 @@ export default class MistralChatService
   }
 
   /**
-   * Override makeToolMessages to handle MCP placeholder scenarios.
+   * Override makeToolResultMessages to handle MCP placeholder scenarios.
    *
    * In some cases (e.g., MCP tools), the tool output cannot be converted
    * into an OpenAI-compatible tool message, so a placeholder user message
@@ -23,21 +23,21 @@ export default class MistralChatService
    * However, in Mistral, every tool message must be immediately followed
    * by an assistant message. Therefore, when the message sequence is:
    *
-   *   [assistant, tool, user (placeholder)]
+   *   [tool, user (placeholder)]
    *
    * a minimal assistant "bridge" message is inserted before the placeholder
    * user message. This satisfies the protocol requirements and instructs
    * the model to ignore the placeholder output while continuing to process
    * the subsequent user message.
    */
-  protected override async makeToolMessages(
+  protected override async makeToolResultMessages(
     tool: ITool,
     toolResult: any,
   ): Promise<IChatRequestMessage[]> {
-    const messages = await super.makeToolMessages(tool, toolResult);
+    const messages = await super.makeToolResultMessages(tool, toolResult);
 
-    if (messages.length === 3 && messages[2].role === 'user') {
-      messages.splice(2, 0, {
+    if (messages.length === 2 && messages[1].role === 'user') {
+      messages.splice(1, 0, {
         role: 'assistant',
         content: [
           {

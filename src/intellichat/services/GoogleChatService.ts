@@ -1,18 +1,22 @@
-import Debug from 'debug';
-import { filetypemime } from 'magic-bytes.js';
-import {
+import type { ContentBlock as MCPContentBlock } from "@modelcontextprotocol/sdk/types.js";
+import Debug from "debug";
+import { ContentBlockConverter as MCPContentBlockConverter } from "intellichat/mcp/ContentBlockConverter";
+import type BaseReader from "intellichat/readers/BaseReader";
+import GoogleReader from "intellichat/readers/GoogleReader";
+import type { ITool } from "intellichat/readers/IChatReader";
+import type {
+  IAnthropicTool,
   IChatContext,
   IChatRequestMessage,
   IChatRequestPayload,
-  IAnthropicTool,
   IGeminiChatRequestMessagePart,
   IGoogleTool,
   IMCPTool,
   IOpenAITool,
   StructuredPrompt,
-} from 'intellichat/types';
-import { isBlank } from 'utils/validators';
-import Google from 'providers/Google';
+} from "intellichat/types";
+import { filetypemime } from "magic-bytes.js";
+import Google from "providers/Google";
 import {
   addStringTypeToEnumProperty,
   getBase64,
@@ -21,21 +25,14 @@ import {
   stripHtmlTags,
   transformPropertiesType,
   urlJoin,
-} from 'utils/util';
-import BaseReader from 'intellichat/readers/BaseReader';
-import GoogleReader from 'intellichat/readers/GoogleReader';
-import { ContentBlockConverter as MCPContentBlockConverter } from 'intellichat/mcp/ContentBlockConverter';
-import { ContentBlock as MCPContentBlock } from '@modelcontextprotocol/sdk/types.js';
-import { ITool } from 'intellichat/readers/IChatReader';
-import NextChatService from './NextChatService';
-import INextChatService from './INextCharService';
+} from "utils/util";
+import { isBlank } from "utils/validators";
+import type INextChatService from "./INextCharService";
+import NextChatService from "./NextChatService";
 
-const debug = Debug('5ire:intellichat:GoogleChatService');
+const debug = Debug("5ire:intellichat:GoogleChatService");
 
-export default class GoogleChatService
-  extends NextChatService
-  implements INextChatService
-{
+export default class GoogleChatService extends NextChatService implements INextChatService {
   constructor(name: string, context: IChatContext) {
     super({
       name,
@@ -45,21 +42,33 @@ export default class GoogleChatService
   }
 
   // eslint-disable-next-line class-methods-use-this
-  protected getReaderType(): new (
-    reader: ReadableStreamDefaultReader<Uint8Array>,
-  ) => BaseReader {
+  protected getReaderType(): new (reader: ReadableStreamDefaultReader<Uint8Array>) => BaseReader {
     return GoogleReader;
   }
 
   // eslint-disable-next-line class-methods-use-this
-  protected async makeToolMessages(
-    tool: ITool,
-    toolResult: any,
-  ): Promise<IChatRequestMessage[]> {
-    const functionCallPart = this.makeFunctionCallPart(tool);
+  protected makeAssistantMessageWithTools(tools: ITool[], content?: string): IChatRequestMessage {
+    const parts: any[] = [];
+
+    if (content && content.trim().length > 0) {
+      parts.push({ text: content });
+    }
+
+    for (const tool of tools) {
+      parts.push({ functionCall: this.makeFunctionCallPart(tool) });
+    }
+
+    return {
+      role: "model",
+      parts,
+    };
+  }
+
+  // eslint-disable-next-line class-methods-use-this
+  protected async makeToolResultMessages(tool: ITool, toolResult: any): Promise<IChatRequestMessage[]> {
     const parts = [];
 
-    if (typeof toolResult === 'string') {
+    if (typeof toolResult === "string") {
       parts.push({
         functionResponse: {
           name: tool.name,
@@ -82,32 +91,28 @@ export default class GoogleChatService
     }
 
     if (!toolResult.isError && toolResult.content) {
-      const content = Array.isArray(toolResult.content)
-        ? toolResult.content
-        : [];
+      const content = Array.isArray(toolResult.content) ? toolResult.content : [];
 
       const convertedBlocks = await Promise.all(
         content.map((block: MCPContentBlock) =>
           MCPContentBlockConverter.convert(block, (uri) => {
-            return window.electron.mcp
-              .readResource(tool.name.split('--')[0], uri)
-              .then((result) => {
-                if (result.isError) {
-                  return [];
-                }
+            return window.electron.mcp.readResource(tool.name.split("--")[0], uri).then((result) => {
+              if (result.isError) {
+                return [];
+              }
 
-                return result.contents;
-              });
+              return result.contents;
+            });
           }),
         ),
       );
 
-      if (convertedBlocks.every((item) => item.type === 'text')) {
+      if (convertedBlocks.every((item) => item.type === "text")) {
         parts.push({
           functionResponse: {
             name: tool.name,
             response: {
-              content: convertedBlocks.map((item) => item.text).join('\n\n\n'),
+              content: convertedBlocks.map((item) => item.text).join("\n\n\n"),
             },
           },
         });
@@ -124,12 +129,12 @@ export default class GoogleChatService
         // eslint-disable-next-line no-restricted-syntax
         for (const item of convertedBlocks) {
           switch (item.type) {
-            case 'text':
+            case "text":
               parts.push({
                 text: item.text,
               });
               break;
-            case 'audio': {
+            case "audio": {
               parts.push({
                 inline_data: {
                   mimeType: item.source.mimeType,
@@ -138,8 +143,8 @@ export default class GoogleChatService
               });
               break;
             }
-            case 'image':
-              if (item.source.type === 'url') {
+            case "image":
+              if (item.source.type === "url") {
                 parts.push({
                   fileData: {
                     fileUri: item.source.url,
@@ -164,24 +169,14 @@ export default class GoogleChatService
 
     return [
       {
-        role: 'model',
-        parts: [
-          {
-            functionCall: functionCallPart,
-          },
-        ],
-      },
-      {
-        role: 'function',
+        role: "function",
         parts: parts as any,
       },
     ];
   }
 
   // eslint-disable-next-line class-methods-use-this
-  protected makeTool(
-    tool: IMCPTool,
-  ): IOpenAITool | IAnthropicTool | IGoogleTool {
+  protected makeTool(tool: IMCPTool): IOpenAITool | IAnthropicTool | IGoogleTool {
     if (Object.keys(tool.inputSchema.properties).length === 0) {
       return {
         name: tool.name,
@@ -217,16 +212,14 @@ export default class GoogleChatService
     };
   }
 
-  protected async convertPromptContent(
-    content: string,
-  ): Promise<IGeminiChatRequestMessagePart[]> {
+  protected async convertPromptContent(content: string): Promise<IGeminiChatRequestMessagePart[]> {
     if (this.context.getModel().capabilities?.vision?.enabled) {
       const items = splitByImg(content, false);
 
       const result = await Promise.all(
         items.map(async (item) => {
-          if (item.type === 'image') {
-            if (item.dataType === 'URL') {
+          if (item.type === "image") {
+            if (item.dataType === "URL") {
               return {
                 inline_data: {
                   mimeType: item.mimeType,
@@ -237,16 +230,16 @@ export default class GoogleChatService
             return {
               inline_data: {
                 mimeType: item.mimeType as string,
-                data: item.data.split('base64,')[1], // remove data:image/png;base64,
+                data: item.data.split("base64,")[1], // remove data:image/png;base64,
               },
             };
           }
-          if (item.type === 'text') {
+          if (item.type === "text") {
             return {
               text: item.data,
             };
           }
-          throw new Error('Unknown message type');
+          throw new Error("Unknown message type");
         }),
       );
 
@@ -259,15 +252,12 @@ export default class GoogleChatService
    *
    * 由于  gemini-pro-vision  不支持多轮对话，因此如果提示词包含图片，则不包含历史信息。
    */
-  protected async makeMessages(
-    messages: IChatRequestMessage[],
-    msgId?: string,
-  ): Promise<IChatRequestMessage[]> {
+  protected async makeMessages(messages: IChatRequestMessage[], msgId?: string): Promise<IChatRequestMessage[]> {
     const result: IChatRequestMessage[] = [];
     const systemMessage = this.context.getSystemMessage();
     if (!isBlank(systemMessage)) {
       result.push({
-        role: 'user',
+        role: "user",
         parts: [{ text: systemMessage as string }],
       });
     }
@@ -275,75 +265,69 @@ export default class GoogleChatService
     await Promise.all(
       this.context.getCtxMessages(msgId).map(async (msg) => {
         if (msg.structuredPrompts) {
-          const strucuredPrompts = JSON.parse(
-            msg.structuredPrompts,
-          ) as StructuredPrompt[];
+          const strucuredPrompts = JSON.parse(msg.structuredPrompts) as StructuredPrompt[];
 
           const transformedMessages = await Promise.all(
-            strucuredPrompts.map<Promise<IChatRequestMessage>>(
-              async (prompt) => {
-                const parts = await Promise.all(
-                  prompt.raw.convertedContent.map<
-                    Promise<IGeminiChatRequestMessagePart>
-                  >(async (block) => {
-                    if (block.type === 'text') {
-                      return {
-                        text: block.text,
-                      };
-                    }
-                    if (block.type === 'image') {
-                      const { source } = block;
+            strucuredPrompts.map<Promise<IChatRequestMessage>>(async (prompt) => {
+              const parts = await Promise.all(
+                prompt.raw.convertedContent.map<Promise<IGeminiChatRequestMessagePart>>(async (block) => {
+                  if (block.type === "text") {
+                    return {
+                      text: block.text,
+                    };
+                  }
+                  if (block.type === "image") {
+                    const { source } = block;
 
-                      if (source.type === 'base64') {
-                        return {
-                          inline_data: {
-                            mimeType: source.mimeType,
-                            data: source.data,
-                          },
-                        };
-                      }
-                      const data = await getBase64(source.url);
-                      const binary = new Uint8Array(
-                        atob(data)
-                          .split('')
-                          .map((c) => c.charCodeAt(0)),
-                      );
-                      const mimeType = filetypemime(binary)[0] || 'audio/mpeg';
-
+                    if (source.type === "base64") {
                       return {
                         inline_data: {
-                          data,
-                          mimeType,
+                          mimeType: source.mimeType,
+                          data: source.data,
                         },
                       };
                     }
+                    const data = await getBase64(source.url);
+                    const binary = new Uint8Array(
+                      atob(data)
+                        .split("")
+                        .map((c) => c.charCodeAt(0)),
+                    );
+                    const mimeType = filetypemime(binary)[0] || "audio/mpeg";
+
                     return {
                       inline_data: {
-                        mimeType: block.source.mimeType,
-                        data: block.source.data,
+                        data,
+                        mimeType,
                       },
                     };
-                  }),
-                );
+                  }
+                  return {
+                    inline_data: {
+                      mimeType: block.source.mimeType,
+                      data: block.source.data,
+                    },
+                  };
+                }),
+              );
 
-                return {
-                  role: prompt.role as 'user',
-                  parts,
-                };
-              },
-            ),
+              return {
+                role: prompt.role as "user",
+                parts,
+              };
+            }),
           );
 
           result.push(...transformedMessages);
         } else {
           result.push({
-            role: 'user',
+            role: "user",
             parts: [{ text: msg.prompt }],
           });
         }
 
         result.push({
-          role: 'model',
+          role: "model",
           parts: [
             {
               text: msg.reply,
@@ -359,10 +343,7 @@ export default class GoogleChatService
     return result;
   }
 
-  protected async makePayload(
-    messages: IChatRequestMessage[],
-    msgId?: string,
-  ): Promise<IChatRequestPayload> {
+  protected async makePayload(messages: IChatRequestMessage[], msgId?: string): Promise<IChatRequestPayload> {
     const payload: IChatRequestPayload = {
       contents: await this.makeMessages(messages, msgId),
       generationConfig: {
@@ -384,7 +365,7 @@ export default class GoogleChatService
               function_declarations: [transformPropertiesType(_tools)],
             },
           ];
-          payload.tool_config = { function_calling_config: { mode: 'AUTO' } };
+          payload.tool_config = { function_calling_config: { mode: "AUTO" } };
         }
       }
     }
@@ -392,42 +373,31 @@ export default class GoogleChatService
     if (payload.generationConfig && maxOutputTokens) {
       payload.generationConfig.maxOutputTokens = maxOutputTokens;
     }
-    debug('payload', payload);
+    debug("payload", payload);
     return payload;
   }
 
-  protected async makeRequest(
-    messages: IChatRequestMessage[],
-    msgId?: string,
-  ): Promise<Response> {
+  protected async makeRequest(messages: IChatRequestMessage[], msgId?: string): Promise<Response> {
     const payload = await this.makePayload(messages, msgId);
     const isStream = this.context.isStream();
-    debug(
-      `About to make a request,stream:${isStream},  payload: ${JSON.stringify(
-        payload,
-      )}\r\n`,
-    );
+    debug(`About to make a request,stream:${isStream},  payload: ${JSON.stringify(payload)}\r\n`);
     const provider = this.context.getProvider();
     const url = urlJoin(
-      `/v1beta/models/${this.getModelName()}:${
-        isStream ? 'streamGenerateContent' : 'generateContent'
-      }`,
+      `/v1beta/models/${this.getModelName()}:${isStream ? "streamGenerateContent" : "generateContent"}`,
       provider.apiBase.trim(),
     );
     const headers = {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': provider.apiKey.trim(),
+      "Content-Type": "application/json",
+      "x-goog-api-key": provider.apiKey.trim(),
     };
 
     return this.makeHttpRequest(url, headers, payload, isStream);
   }
 
-  private async processNewMessages(
-    messages: IChatRequestMessage[],
-  ): Promise<IChatRequestMessage[]> {
+  private async processNewMessages(messages: IChatRequestMessage[]): Promise<IChatRequestMessage[]> {
     return Promise.all(
       messages.map(async (msg) => {
-        if (typeof msg.content === 'string') {
+        if (typeof msg.content === "string") {
           return {
             role: msg.role,
             parts: await this.convertPromptContent(msg.content),
@@ -442,7 +412,7 @@ export default class GoogleChatService
   }
 
   private isGemini3Model(): boolean {
-    return this.getModelName().toLowerCase().startsWith('gemini-3');
+    return this.getModelName().toLowerCase().startsWith("gemini-3");
   }
 
   private makeFunctionCallPart(tool: ITool): Record<string, any> {

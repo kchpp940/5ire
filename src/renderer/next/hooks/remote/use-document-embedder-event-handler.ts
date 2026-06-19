@@ -2,11 +2,9 @@ import { useEffect, useRef } from "react";
 import type { Emitter } from "@/main/internal/emitter";
 import type { DocumentEmbedder } from "@/main/services/document-embedder";
 
-export type DocumentEmbedderEvent = Emitter.WildcardEventChunk<DocumentEmbedder.Events>;
+type EventHandler = (event: Emitter.WildcardEventChunk<DocumentEmbedder.Events>) => void;
 
-export type DocumentEmbedderEventHandler = (event: DocumentEmbedderEvent) => void;
-
-export const useDocumentEmbedderEventHandler = (handler: DocumentEmbedderEventHandler) => {
+export const useDocumentEmbedderEventHandler = (handler: EventHandler) => {
   const controller = useRef(new AbortController());
   const fn = useRef(handler);
 
@@ -15,12 +13,8 @@ export const useDocumentEmbedderEventHandler = (handler: DocumentEmbedderEventHa
   }, [handler]);
 
   useEffect(() => {
-    let stream: Awaited<ReturnType<typeof window.bridge.documentEmbedder.createEventStream>> | undefined;
-    let stopped = false;
-
-    window.bridge.documentEmbedder.createEventStream().then(async (s) => {
-      stream = s;
-      while (!stopped) {
+    window.bridge.documentEmbedder.createEventStream().then(async (stream) => {
+      while (true) {
         const chunk = await stream.next();
 
         if (chunk.done) {
@@ -32,9 +26,7 @@ export const useDocumentEmbedderEventHandler = (handler: DocumentEmbedderEventHa
     });
 
     return () => {
-      stopped = true;
       controller.current.abort();
-      stream?.stop().catch(() => {});
     };
   }, []);
 };

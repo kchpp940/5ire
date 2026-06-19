@@ -35,11 +35,6 @@ import {
   DataGridRow,
   type RowRenderer,
 } from "@fluentui-contrib/react-data-grid-react-window";
-import {
-  bundleIcon,
-  DismissCircleFilled,
-  DismissCircleRegular,
-} from "@fluentui/react-icons";
 import useToast from "hooks/useToast";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -48,13 +43,7 @@ import ConfirmDialog from "renderer/components/ConfirmDialog";
 import { fmtDateTime } from "utils/util";
 import type { Document } from "@/main/database/types";
 import { useDocumentEmbedder } from "@/renderer/next/hooks/remote/use-document-embedder";
-import {
-  useDocumentEmbedderEventHandler,
-  type DocumentEmbedderEvent,
-} from "@/renderer/next/hooks/remote/use-document-embedder-event-handler";
 import { useLiveDocuments } from "@/renderer/next/hooks/remote/use-live-documents";
-
-const DismissIcon = bundleIcon(DismissCircleFilled, DismissCircleRegular);
 
 const DeleteIcon = bundleIcon(DeleteFilled, DeleteRegular);
 
@@ -126,13 +115,13 @@ const StatusIndicator = (props: StatusIndicatorProps) => {
 export default function Grid() {
   const { id } = useParams();
   const { t } = useTranslation();
-  const { notifySuccess, notifyError, notifyInfo } = useToast();
+  const { notifySuccess } = useToast();
 
   const documents = useLiveDocuments(id || "");
 
   const items = useMemo(() => documents.rows, [documents]);
 
-  const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
+  const [deletingCollectionId, setDeletingCollectionId] = useState<string | null>(null);
 
   const [innerHeight, setInnerHeight] = useState(window.innerHeight);
 
@@ -146,41 +135,18 @@ export default function Grid() {
     };
   }, []);
 
-  useDocumentEmbedderEventHandler((event: DocumentEmbedderEvent) => {
-    if (event.event === "document-embed-failed") {
-      notifyError(`${t("Knowledge.Notification.EmbedFailed")}: ${event.payload.message}`);
-    } else if (event.event === "document-embed-cancelled") {
-      notifyInfo(t("Knowledge.Notification.EmbedCancelled"));
-    } else if (event.event === "document-embed-interrupted") {
-      notifyInfo(t("Knowledge.Notification.EmbedInterrupted"));
-    }
-  });
-
   const handleDelete = (id: string) => {
-    setDeletingDocumentId(id);
+    setDeletingCollectionId(id);
   };
 
   const handleConfirmDelete = () => {
-    if (deletingDocumentId) {
+    if (deletingCollectionId) {
       window.bridge.documentManager
-        .deleteDocument({ id: deletingDocumentId })
+        .deleteDocument({ id: deletingCollectionId })
         .then(() => {
           notifySuccess(t("Knowledge.Notification.DocumentDeleted"));
         })
-        .catch(console.error)
-        .finally(() => {
-          setDeletingDocumentId(null);
-        });
-    }
-  };
-
-  const handleCancelProcessing = async (id: string) => {
-    try {
-      await window.bridge.documentEmbedder.cancelDocumentProcessing(id);
-      notifyInfo(t("Knowledge.Notification.EmbedCancelled"));
-    } catch (error) {
-      console.error("Failed to cancel document processing:", error);
-      notifyError(t("Knowledge.Notification.CancelFailed"));
+        .catch(console.error);
     }
   };
 
@@ -239,13 +205,8 @@ export default function Grid() {
                 </MenuTrigger>
                 <MenuPopover>
                   <MenuList>
-                    {item.status === "processing" && (
-                      <MenuItem icon={<DismissIcon />} onClick={() => handleCancelProcessing(item.id)}>
-                        {t("Common.Cancel")}
-                      </MenuItem>
-                    )}
                     <MenuItem icon={<DeleteIcon />} onClick={() => handleDelete(item.id)}>
-                      {t("Common.Delete")}
+                      {t("Common.Delete")}{" "}
                     </MenuItem>
                   </MenuList>
                 </MenuPopover>
@@ -295,8 +256,8 @@ export default function Grid() {
         </DataGridBody>
       </DataGrid>
       <ConfirmDialog
-        open={!!deletingDocumentId}
-        setOpen={() => setDeletingDocumentId(null)}
+        open={!!deletingCollectionId}
+        setOpen={() => setDeletingCollectionId(null)}
         message={t("Knowledge.Confirmation.DeleteDocument")}
         onConfirm={handleConfirmDelete}
       />

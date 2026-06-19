@@ -87,7 +87,30 @@ export default class OllamaChatService
     };
   }
 
-  protected async makeToolMessages(tool: ITool, toolResult: any) {
+  // eslint-disable-next-line class-methods-use-this
+  protected makeAssistantMessageWithTools(tools: ITool[], content?: string): IChatRequestMessage {
+    const toolCalls = tools.map((tool) => ({
+      id: tool.id,
+      type: 'function',
+      function: {
+        arguments: tool.args, // unlike openai, ollama tool args is not a string
+        name: tool.name,
+      },
+    }));
+
+    const result: IChatRequestMessage = {
+      role: 'assistant',
+      tool_calls: toolCalls,
+    };
+
+    if (content && content.trim().length > 0) {
+      result.content = content;
+    }
+
+    return result;
+  }
+
+  protected async makeToolResultMessages(tool: ITool, toolResult: any) {
     let supplement: IChatRequestMessage | undefined;
 
     const toolMessageContent: IChatRequestMessageContent[] = [];
@@ -155,19 +178,6 @@ export default class OllamaChatService
     }
 
     const result: IChatRequestMessage[] = [
-      {
-        role: 'assistant',
-        tool_calls: [
-          {
-            id: tool.id,
-            type: 'function',
-            function: {
-              arguments: tool.args, // unlike openai, ollama tool args is not a string
-              name: tool.name,
-            },
-          },
-        ],
-      },
       {
         role: 'tool',
         name: tool.name,

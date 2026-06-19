@@ -139,7 +139,33 @@ export default class AnthropicChatService extends NextChatService implements INe
    * @returns {IChatRequestMessage[]} Array of messages representing the tool use and result
    */
   // eslint-disable-next-line class-methods-use-this
-  protected async makeToolMessages(tool: ITool, toolResult: any, content?: string): Promise<IChatRequestMessage[]> {
+  protected makeAssistantMessageWithTools(tools: ITool[], content?: string): IChatRequestMessage {
+    const contentBlocks: any[] = [];
+
+    if (content && content.trim().length > 0) {
+      contentBlocks.push({
+        type: "text",
+        text: content,
+      });
+    }
+
+    for (const tool of tools) {
+      contentBlocks.push({
+        type: "tool_use",
+        id: tool.id,
+        name: tool.name,
+        input: tool.args ?? {},
+      });
+    }
+
+    return {
+      role: "assistant",
+      content: contentBlocks,
+    };
+  }
+
+  // eslint-disable-next-line class-methods-use-this
+  protected async makeToolResultMessages(tool: ITool, toolResult: any): Promise<IChatRequestMessage[]> {
     /**
      * Note：not supported tool's inputs
      * 1.mimeType
@@ -217,30 +243,12 @@ export default class AnthropicChatService extends NextChatService implements INe
       }
     }
 
-    const result = [
-      {
-        role: "assistant",
-        content: [
-          {
-            type: "tool_use",
-            id: tool.id,
-            name: tool.name,
-            input: tool.args ?? {},
-          },
-        ],
-      },
+    return [
       {
         role: "user",
         content: parts,
       },
     ] as IChatRequestMessage[];
-    if (content && content.trim().length > 0) {
-      (result[0].content as any[]).unshift({
-        type: "text",
-        text: content,
-      });
-    }
-    return result;
   }
 
   /**

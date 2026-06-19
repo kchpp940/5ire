@@ -8,7 +8,7 @@ export interface ITool {
 export interface IReadResult {
   content: string;
   reasoning?: string;
-  tool?: ITool | null;
+  tools: ITool[];
   inputTokens?: number;
   outputTokens?: number;
 }
@@ -20,6 +20,6 @@ export default interface IChatReader {
   }: {
     onError: (error: any) => void;
     onProgress: (chunk: string, reasoning?: string) => void;
-    onToolCalls: (toolCalls: any) => void;
+    onToolCalls: (toolName: string | null) => void;
   }): Promise<IReadResult>;
 }

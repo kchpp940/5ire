@@ -273,7 +273,30 @@ export default class OpenAIChatService extends NextChatService implements INextC
   }
 
   // eslint-disable-next-line class-methods-use-this
-  protected async makeToolMessages(tool: ITool, toolResult: any): Promise<IChatRequestMessage[]> {
+  protected makeAssistantMessageWithTools(tools: ITool[], content?: string): IChatRequestMessage {
+    const toolCalls = tools.map((tool) => ({
+      id: tool.id,
+      type: "function",
+      function: {
+        arguments: JSON.stringify(tool.args),
+        name: tool.name,
+      },
+    }));
+
+    const result: IChatRequestMessage = {
+      role: "assistant",
+      tool_calls: toolCalls,
+    };
+
+    if (content && content.trim().length > 0) {
+      result.content = content;
+    }
+
+    return result;
+  }
+
+  // eslint-disable-next-line class-methods-use-this
+  protected async makeToolResultMessages(tool: ITool, toolResult: any): Promise<IChatRequestMessage[]> {
     let supplement: IChatRequestMessage | undefined;
 
     const toolMessageContent: IChatRequestMessageContent[] = [];
@@ -336,19 +359,6 @@ export default class OpenAIChatService extends NextChatService implements INextC
 
     const result: IChatRequestMessage[] = [
       {
-        role: "assistant",
-        tool_calls: [
-          {
-            id: tool.id,
-            type: "function",
-            function: {
-              arguments: JSON.stringify(tool.args),
-              name: tool.name,
-            },
-          },
-        ],
-      },
-      {
         role: "tool",
         name: tool.name,
         content: toolMessageContent,
@@ -360,7 +370,7 @@ export default class OpenAIChatService extends NextChatService implements INextC
       result.push(supplement);
     }
 
-    console.log("tool messages", result);
+    console.log("tool result messages", result);
 
     return result;
   }

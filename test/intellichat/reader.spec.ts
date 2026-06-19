@@ -1,7 +1,7 @@
-import { describe, expect, test } from '@jest/globals';
-import OpenAIReader from '../../src/intellichat/readers/OpenAIReader';
-import AnthropicReader from '../../src/intellichat/readers/AnthropicReader';
-import GoogleReader from '../../src/intellichat/readers/GoogleReader';
+import { describe, expect, test } from "@jest/globals";
+import AnthropicReader from "../../src/intellichat/readers/AnthropicReader";
+import GoogleReader from "../../src/intellichat/readers/GoogleReader";
+import OpenAIReader from "../../src/intellichat/readers/OpenAIReader";
 
 const openAIResponse = `data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-4o-mini", "system_fingerprint": "fp_44709d6fcb", "choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}]}
 data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-4o-mini", "syst
@@ -37,8 +37,7 @@ class MockReader {
   private cursor: number = 0;
   constructor(mockData: string | string[]) {
     const encode = new TextEncoder();
-    const lines =
-      typeof mockData === 'string' ? mockData.split('\n') : mockData;
+    const lines = typeof mockData === "string" ? mockData.split("\n") : mockData;
     for (let i = 0; i < lines.length; i++) {
       this.data.push({
         value: encode.encode(lines[i]),
@@ -51,11 +50,9 @@ class MockReader {
   }
 }
 
-describe('intellichat/readers/OpenAIReader', () => {
-  test('read ', async () => {
-    const mockReader = new MockReader(
-      openAIResponse
-    ) as unknown as ReadableStreamDefaultReader<Uint8Array>;
+describe("intellichat/readers/OpenAIReader", () => {
+  test("read ", async () => {
+    const mockReader = new MockReader(openAIResponse) as unknown as ReadableStreamDefaultReader<Uint8Array>;
     let toolName: null | string = null;
     const openAIReader = new OpenAIReader(mockReader);
     const result = await openAIReader.read({
@@ -65,17 +62,16 @@ describe('intellichat/readers/OpenAIReader', () => {
       onError: (err: any) => {
         console.error(err);
       },
-      onToolCalls: (tool: string) => {
-        toolName = tool;
+      onToolCalls: (name: string | null) => {
+        toolName = name;
       },
     });
-    expect(result.content).toEqual('Hello World!');
+    expect(result.content).toEqual("Hello World!");
     expect(toolName).toBeNull();
+    expect(result.tools).toEqual([]);
   });
-  test('read with tool calls', async () => {
-    const mockReader = new MockReader(
-      openAIResponseTools
-    ) as unknown as ReadableStreamDefaultReader<Uint8Array>;
+  test("read with tool calls", async () => {
+    const mockReader = new MockReader(openAIResponseTools) as unknown as ReadableStreamDefaultReader<Uint8Array>;
     let toolName: null | string = null;
     const openAIReader = new OpenAIReader(mockReader);
     const result = await openAIReader.read({
@@ -85,17 +81,19 @@ describe('intellichat/readers/OpenAIReader', () => {
       onError: (err: any) => {
         console.error(err);
       },
-      onToolCalls: (tool: string) => {
-        toolName = tool;
+      onToolCalls: (name: string | null) => {
+        toolName = name;
       },
     });
-    expect(result.content).toEqual('');
-    expect(toolName).toEqual('search_notes');
-    expect(result.tool).toEqual({
-      id: 'call_iXWEt3RGcPnNzT8Zn52HRTVj',
-      name: 'search_notes',
-      args: { query: 'Levenshtein' },
-    });
+    expect(result.content).toEqual("");
+    expect(toolName).toEqual("search_notes");
+    expect(result.tools).toEqual([
+      {
+        id: "call_iXWEt3RGcPnNzT8Zn52HRTVj",
+        name: "search_notes",
+        args: { query: "Levenshtein" },
+      },
+    ]);
   });
 });
 
@@ -146,12 +144,10 @@ data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_se
 data: quence":null},"usage":{"output_tokens":89}}
 data: {"type":"message_stop"}`;
 
-describe('intellichat/readers/AnthropicReader', () => {
-  test('read ', async () => {
-    const mockReader = new MockReader(
-      anthropicResponse
-    ) as unknown as ReadableStreamDefaultReader<Uint8Array>;
-    let toolName = null;
+describe("intellichat/readers/AnthropicReader", () => {
+  test("read ", async () => {
+    const mockReader = new MockReader(anthropicResponse) as unknown as ReadableStreamDefaultReader<Uint8Array>;
+    let toolName: null | string = null;
     const anthropicReader = new AnthropicReader(mockReader);
     const result = await anthropicReader.read({
       onProgress: (content: string) => {
@@ -160,21 +156,19 @@ describe('intellichat/readers/AnthropicReader', () => {
       onError: (err: any) => {
         console.error(err);
       },
-      onToolCalls: (toolName: string) => {
-        toolName = toolName;
+      onToolCalls: (name: string | null) => {
+        toolName = name;
       },
     });
-    expect(result.content).toEqual('Hello!');
+    expect(result.content).toEqual("Hello!");
     expect(toolName).toBeNull();
-    expect(result.tool).toBeNull();
-    expect(result.outputTokens).toEqual(16);
+    expect(result.tools).toEqual([]);
+    expect(result.outputTokens).toEqual(15);
     expect(result.inputTokens).toEqual(25);
   });
 
-  test('read with tool calls', async () => {
-    const mockReader = new MockReader(
-      anthropicResponseTools
-    ) as unknown as ReadableStreamDefaultReader<Uint8Array>;
+  test("read with tool calls", async () => {
+    const mockReader = new MockReader(anthropicResponseTools) as unknown as ReadableStreamDefaultReader<Uint8Array>;
     let toolName: null | string = null;
     const anthropicReader = new AnthropicReader(mockReader);
     const result = await anthropicReader.read({
@@ -184,20 +178,20 @@ describe('intellichat/readers/AnthropicReader', () => {
       onError: (err: any) => {
         console.error(err);
       },
-      onToolCalls: (tool: string) => {
-        toolName = tool;
+      onToolCalls: (name: string | null) => {
+        toolName = name;
       },
     });
-    expect(result.content).toEqual(
-      "Okay, let's check the weather for San Francisco, CA:"
-    );
-    expect(toolName).toEqual('get_weather');
-    expect(result.tool).toEqual({
-      id: 'toolu_01T1x1fJ34qAmk2tNTrN7Up6',
-      name: 'get_weather',
-      args: { location: 'San Francisco, CA', unit: 'fahrenheit' },
-    });
-    expect(result.outputTokens).toEqual(91);
+    expect(result.content).toEqual("Okay, let's check the weather for San Francisco, CA:");
+    expect(toolName).toEqual("get_weather");
+    expect(result.tools).toEqual([
+      {
+        id: "toolu_01T1x1fJ34qAmk2tNTrN7Up6",
+        name: "get_weather",
+        args: { location: "San Francisco, CA", unit: "fahrenheit" },
+      },
+    ]);
+    expect(result.outputTokens).toEqual(89);
     expect(result.inputTokens).toEqual(472);
   });
 });
@@ -361,10 +355,11 @@ const googleResponse = [
 		},
 		"modelVersion": "gemini-pro"
 	}`,
-  ']',
+  "]",
 ];
 
-const googleResponseTools = [`[
+const googleResponseTools = [
+  `[
   {
     "candidates": [
       {
@@ -418,9 +413,11 @@ const googleResponseTools = [`[
     },
     "modelVersion": "gemini-pro"
   }
-]`];
+]`,
+];
 
-const googleResponseToolsWithThoughtSignature = [`[
+const googleResponseToolsWithThoughtSignature = [
+  `[
   {
     "candidates": [
       {
@@ -450,37 +447,34 @@ const googleResponseToolsWithThoughtSignature = [`[
     },
     "modelVersion": "gemini-3-pro-preview"
   }
-]`];
+]`,
+];
 
-describe('intellichat/readers/GoogleReader', () => {
-  test('read ', async () => {
-    const mockReader = new MockReader(
-      googleResponse
-    ) as unknown as ReadableStreamDefaultReader<Uint8Array>;
-    let toolName = null;
+describe("intellichat/readers/GoogleReader", () => {
+  test("read ", async () => {
+    const mockReader = new MockReader(googleResponse) as unknown as ReadableStreamDefaultReader<Uint8Array>;
+    let toolName: null | string = null;
     const googleReader = new GoogleReader(mockReader);
     const result = await googleReader.read({
-      onProgress: (content: string, reasoning?:string) => {
+      onProgress: (content: string, reasoning?: string) => {
         console.log(content);
       },
       onError: (err: any) => {
         console.error(err);
       },
-      onToolCalls: (toolName: string) => {
-        toolName = toolName;
+      onToolCalls: (name: string | null) => {
+        toolName = name;
       },
     });
     expect(result.content).toEqual(`Hi, I'm Gemini from Google`);
     expect(toolName).toBeNull();
-    expect(result.tool).toBeNull();
-    expect(result.outputTokens).toEqual(356);
+    expect(result.tools).toEqual([]);
+    expect(result.outputTokens).toEqual(180);
     expect(result.inputTokens).toEqual(5);
   });
 
-  test('read with tool calls', async () => {
-    const mockReader = new MockReader(
-      googleResponseTools
-    ) as unknown as ReadableStreamDefaultReader<Uint8Array>;
+  test("read with tool calls", async () => {
+    const mockReader = new MockReader(googleResponseTools) as unknown as ReadableStreamDefaultReader<Uint8Array>;
     let toolName: null | string = null;
     const googleReader = new GoogleReader(mockReader);
     const result = await googleReader.read({
@@ -490,24 +484,26 @@ describe('intellichat/readers/GoogleReader', () => {
       onError: (err: any) => {
         console.error(err);
       },
-      onToolCalls: (tool: string) => {
-        toolName = tool;
+      onToolCalls: (name: string | null) => {
+        toolName = name;
       },
     });
-    expect(result.content).toEqual('');
-    expect(toolName).toEqual('search_notes');
-    expect(result.tool).toEqual({
-      id: "",
-      name: 'search_notes',
-      args: {query: "Levenshtein"},
-    });
+    expect(result.content).toEqual("");
+    expect(toolName).toEqual("search_notes");
+    expect(result.tools).toEqual([
+      {
+        id: "",
+        name: "search_notes",
+        args: { query: "Levenshtein" },
+      },
+    ]);
     expect(result.outputTokens).toEqual(17);
     expect(result.inputTokens).toEqual(184);
   });
 
-  test('read with tool calls and thought signature', async () => {
+  test("read with tool calls and thought signature", async () => {
     const mockReader = new MockReader(
-      googleResponseToolsWithThoughtSignature
+      googleResponseToolsWithThoughtSignature,
     ) as unknown as ReadableStreamDefaultReader<Uint8Array>;
     let toolName: null | string = null;
     const googleReader = new GoogleReader(mockReader);
@@ -518,23 +514,25 @@ describe('intellichat/readers/GoogleReader', () => {
       onError: (err: any) => {
         console.error(err);
       },
-      onToolCalls: (tool: string) => {
-        toolName = tool;
+      onToolCalls: (name: string | null) => {
+        toolName = name;
       },
     });
 
-    expect(result.content).toEqual('');
-    expect(toolName).toEqual('search_notes');
-    expect(result.tool).toEqual({
-      id: "",
-      name: 'search_notes',
-      args: { query: "Levenshtein" },
-      rawFunctionCall: {
-        name: 'search_notes',
-        args: { query: 'Levenshtein' },
-        thoughtSignature: 'dGhvdWdodF9zaWduYXR1cmU=',
+    expect(result.content).toEqual("");
+    expect(toolName).toEqual("search_notes");
+    expect(result.tools).toEqual([
+      {
+        id: "",
+        name: "search_notes",
+        args: { query: "Levenshtein" },
+        rawFunctionCall: {
+          name: "search_notes",
+          args: { query: "Levenshtein" },
+          thoughtSignature: "dGhvdWdodF9zaWduYXR1cmU=",
+        },
       },
-    });
+    ]);
     expect(result.outputTokens).toEqual(12);
     expect(result.inputTokens).toEqual(120);
   });
