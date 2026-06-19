@@ -466,13 +466,51 @@ export default abstract class NextCharService {
             }
 
             return { tool, result };
-          } catch (error) {
+          } catch (error: any) {
             this.abortController.signal.removeEventListener("abort", abortHandler);
-            throw error;
+
+            const errorResult = {
+              isError: true,
+              content: [
+                {
+                  error: error?.message || error?.toString() || "Tool call failed",
+                  code: error?.code || "tool_call_failed",
+                  clientName: client,
+                  toolName: name,
+                },
+              ],
+            };
+
+            this.traceTool(chatId, "error", JSON.stringify(errorResult.content[0], null, 2));
+
+            return { tool, result: errorResult };
           }
         });
 
-        const toolResults = await Promise.all(toolCallPromises);
+        const settledResults = await Promise.allSettled(toolCallPromises);
+
+        const toolResults: Array<{ tool: ITool; result: any }> = settledResults.map((settled, idx) => {
+          if (settled.status === "fulfilled") {
+            return settled.value;
+          }
+
+          const prepared = preparedTools[idx];
+          const [client, name] = prepared.tool.name.split("--");
+
+          const errorResult = {
+            isError: true,
+            content: [
+              {
+                error: "Unexpected tool call failure",
+                code: "tool_call_unexpected_error",
+                clientName: client,
+                toolName: name,
+              },
+            ],
+          };
+
+          return { tool: prepared.tool, result: errorResult };
+        });
 
         const resultMsgs = await this.buildToolResultMessages(toolResults);
         toolMessagesList.push(...resultMsgs);
