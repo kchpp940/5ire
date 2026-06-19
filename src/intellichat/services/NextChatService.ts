@@ -342,7 +342,15 @@ export default abstract class NextCharService {
         const assistantMsg = this.makeAssistantMessageWithTools(readResult.tools, readResult.content);
         toolMessagesList.push(assistantMsg);
 
-        const toolResults: Array<{ tool: ITool; result: any }> = [];
+        type PreparedTool = {
+          tool: ITool;
+          toolRequestId: string;
+          abortHandler: () => Promise<void>;
+          skipToolCall: boolean;
+          toolCallsResult?: any;
+        };
+
+        const preparedTools: PreparedTool[] = [];
 
         for (const tool of readResult.tools) {
           const [client, name] = tool.name.split("--");
@@ -356,70 +364,89 @@ export default abstract class NextCharService {
 
           this.abortController.signal.addEventListener("abort", abortHandler);
 
-          try {
-            let toolCallsResult: any;
+          let toolCallsResult: any = undefined;
+          let skipToolCall = false;
 
-            const servers = useMCPStore.getState().config.mcpServers;
-            const server = servers[client];
+          const servers = useMCPStore.getState().config.mcpServers;
+          const server = servers[client];
 
-            const toolCallsCanclledResult = {
-              isError: true,
-              content: [
-                {
-                  error: "Tool call was cancelled by the user.",
-                  code: "tool_call_cancelled",
-                  clientName: client,
-                  toolName: name,
-                },
-              ],
-            };
+          const toolCallsCanclledResult = {
+            isError: true,
+            content: [
+              {
+                error: "Tool call was cancelled by the user.",
+                code: "tool_call_cancelled",
+                clientName: client,
+                toolName: name,
+              },
+            ],
+          };
 
-            if (server?.approvalPolicy) {
-              switch (server.approvalPolicy || "always") {
-                case "always": {
-                  await MCPServerApprovalPolicyDialog.open({
+          if (server?.approvalPolicy) {
+            switch (server.approvalPolicy || "always") {
+              case "always": {
+                await MCPServerApprovalPolicyDialog.open({
+                  toolName: client,
+                  toolType: server.type,
+                  methodName: name,
+                  parameters: tool.args,
+                }).catch(() => {
+                  toolCallsResult = toolCallsCanclledResult;
+                  skipToolCall = true;
+                });
+                break;
+              }
+              case "once": {
+                const isAllowedKey = `APPROVAL_POLICY::${chatId}--${client}`;
+                const isAllowed = await window.electron.store.get(isAllowedKey);
+
+                if (typeof isAllowed !== "boolean") {
+                  const allow = await MCPServerApprovalPolicyDialog.open({
                     toolName: client,
                     toolType: server.type,
                     methodName: name,
                     parameters: tool.args,
-                  }).catch(() => {
+                  })
+                    .then(() => true)
+                    .catch(() => false);
+
+                  await window.electron.store.set(isAllowedKey, allow);
+
+                  if (!allow) {
                     toolCallsResult = toolCallsCanclledResult;
-                  });
-                  break;
-                }
-                case "once": {
-                  const isAllowedKey = `APPROVAL_POLICY::${chatId}--${client}`;
-                  const isAllowed = await window.electron.store.get(isAllowedKey);
-
-                  if (typeof isAllowed !== "boolean") {
-                    const allow = await MCPServerApprovalPolicyDialog.open({
-                      toolName: client,
-                      toolType: server.type,
-                      methodName: name,
-                      parameters: tool.args,
-                    })
-                      .then(() => true)
-                      .catch(() => false);
-
-                    await window.electron.store.set(isAllowedKey, allow);
-
-                    if (!allow) {
-                      toolCallsResult = toolCallsCanclledResult;
-                    }
-                  } else if (isAllowed === false) {
-                    toolCallsResult = toolCallsCanclledResult;
+                    skipToolCall = true;
                   }
+                } else if (isAllowed === false) {
+                  toolCallsResult = toolCallsCanclledResult;
+                  skipToolCall = true;
+                }
 
-                  break;
-                }
-                default: {
-                  break;
-                }
+                break;
+              }
+              default: {
+                break;
               }
             }
+          }
 
-            if (!toolCallsResult) {
-              toolCallsResult = await window.electron.mcp.callTool({
+          preparedTools.push({
+            tool,
+            toolRequestId,
+            abortHandler,
+            skipToolCall,
+            toolCallsResult,
+          });
+        }
+
+        const toolCallPromises = preparedTools.map(async (prepared) => {
+          const { tool, toolRequestId, abortHandler, skipToolCall, toolCallsResult: preResult } = prepared;
+          const [client, name] = tool.name.split("--");
+
+          try {
+            let result = preResult;
+
+            if (!skipToolCall && !result) {
+              result = await window.electron.mcp.callTool({
                 client,
                 name,
                 args: tool.args,
@@ -430,20 +457,22 @@ export default abstract class NextCharService {
             this.abortController.signal.removeEventListener("abort", abortHandler);
 
             this.traceTool(chatId, "arguments", JSON.stringify(tool.args, null, 2));
-            if (toolCallsResult.isError) {
+            if (result.isError) {
               const toolError =
-                toolCallsResult.content.length > 0 ? toolCallsResult.content[0] : { error: "Unknown error" };
+                result.content.length > 0 ? result.content[0] : { error: "Unknown error" };
               this.traceTool(chatId, "error", JSON.stringify(toolError, null, 2));
             } else {
-              this.traceTool(chatId, "response", JSON.stringify(toolCallsResult, null, 2));
+              this.traceTool(chatId, "response", JSON.stringify(result, null, 2));
             }
 
-            toolResults.push({ tool, result: toolCallsResult });
+            return { tool, result };
           } catch (error) {
             this.abortController.signal.removeEventListener("abort", abortHandler);
             throw error;
           }
-        }
+        });
+
+        const toolResults = await Promise.all(toolCallPromises);
 
         const resultMsgs = await this.buildToolResultMessages(toolResults);
         toolMessagesList.push(...resultMsgs);
