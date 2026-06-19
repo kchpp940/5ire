@@ -1,5 +1,26 @@
-import { createStore } from "zustand/vanilla";
+import { createStore, type StoreApi } from "zustand/vanilla";
 import type { Bridge } from "@/main/internal/bridge";
+
+const activeStores = new Set<StreamStore<unknown>>();
+
+export const registerStreamStore = <T>(store: StreamStore<T>) => {
+  activeStores.add(store);
+  return store;
+};
+
+export const unregisterStreamStore = <T>(store: StreamStore<T>) => {
+  activeStores.delete(store);
+};
+
+export const destroyAllStreamStores = async () => {
+  const stores = Array.from(activeStores);
+  activeStores.clear();
+  await Promise.allSettled(stores.map((store) => store.destroy()));
+};
+
+export const getActiveStreamStoreCount = () => {
+  return activeStores.size;
+};
 
 /**
  * Options for creating a stream store
@@ -19,6 +40,15 @@ export type StreamStoreOptions<T> = {
    * @param error - The error that occurred while reading a chunk
    */
   onReadChunkError?: (error: unknown) => void;
+  /**
+   * Whether to register the store in the global registry for cleanup
+   * @default true
+   */
+  autoRegister?: boolean;
+};
+
+export type StreamStore<T> = StoreApi<T> & {
+  destroy: () => Promise<void>;
 };
 
 /**
@@ -31,7 +61,11 @@ export type StreamStoreOptions<T> = {
  * @throws {Error} If the initial state from the stream is empty
  */
 export const createStateStreamStore = async <T>(options: StreamStoreOptions<T>) => {
+  const { autoRegister = true } = options;
   const stream = await options.streamLoader();
+  const abortController = new AbortController();
+  let destroyed = false;
+
   const initial = await stream.next();
 
   if (initial.done) {
@@ -40,12 +74,33 @@ export const createStateStreamStore = async <T>(options: StreamStoreOptions<T>) 
 
   const instance = createStore(() => {
     return initial.value;
-  });
+  }) as StreamStore<T>;
 
   const setState = instance.setState.bind(instance);
 
+  const destroy = async () => {
+    if (destroyed) return;
+    destroyed = true;
+    if (autoRegister) {
+      unregisterStreamStore(instance);
+    }
+    abortController.abort();
+    try {
+      await stream.stop();
+    } catch {
+      // ignore stop errors
+    }
+    options.onDone?.();
+  };
+
+  instance.destroy = destroy;
+
+  if (autoRegister) {
+    registerStreamStore(instance);
+  }
+
   Promise.resolve().then(async () => {
-    while (true) {
+    while (!abortController.signal.aborted) {
       try {
         const chunk = await stream.next();
 
@@ -55,17 +110,27 @@ export const createStateStreamStore = async <T>(options: StreamStoreOptions<T>) 
 
         setState(() => chunk.value, true);
       } catch (error) {
-        await stream
-          .stop()
-          .catch(() => {})
-          .finally(() => {
-            options.onReadChunkError?.(error);
-          });
+        if (abortController.signal.aborted) {
+          break;
+        }
+        try {
+          await stream.stop();
+        } catch {
+          // ignore stop errors
+        }
+        options.onReadChunkError?.(error);
+        break;
       }
     }
 
-    options.onDone?.();
+    if (!destroyed) {
+      destroyed = true;
+      if (autoRegister) {
+        unregisterStreamStore(instance);
+      }
+      options.onDone?.();
+    }
   });
 
-  return { instance, stream };
+  return { instance, stream, destroy };
 };

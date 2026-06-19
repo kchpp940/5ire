@@ -115,7 +115,7 @@ export default class OllamaChatService
         content.map((block: MCPContentBlock) =>
           MCPContentBlockConverter.convert(block, (uri) => {
             return window.electron.mcp
-              .readResource(this.resolveMCPConnectionId(tool.name), uri)
+              .readResource(tool.name.split('--')[0], uri)
               .then((result) => {
                 if (result.isError) {
                   return [];

@@ -3,6 +3,7 @@ import logo from "@/assets/images/logo.png";
 import App from "./App";
 import "./i18n";
 import { Suspense } from "react";
+import { destroyAllStreamStores } from "@/renderer/next/hooks/remote/utils";
 
 const container = document.getElementById("root") as HTMLElement;
 const root = createRoot(container);
@@ -20,3 +21,7 @@ root.render(
 );
 
 window.bridge.renderer.show().catch(() => {});
+
+window.addEventListener("beforeunload", () => {
+  destroyAllStreamStores().catch(() => {});
+});

@@ -300,10 +300,7 @@ export default class OpenAIChatService extends NextChatService implements INextC
       const convertedBlocks = await Promise.all(
         content.map((block: MCPContentBlock) =>
           MCPContentBlockConverter.convert(block, (uri) => {
-            return window.electron.mcp.readResource(
-              this.resolveMCPConnectionId(tool.name),
-              uri,
-            ).then((result) => {
+            return window.electron.mcp.readResource(tool.name.split("--")[0], uri).then((result) => {
               if (result.isError) {
                 return [];
               }
@@ -379,15 +376,6 @@ export default class OpenAIChatService extends NextChatService implements INextC
     if (this.isToolsEnabled()) {
       const tools = await window.electron.mcp.listTools();
       if (tools) {
-        for (const tool of tools.tools) {
-          if (tool._connectionId) {
-            this.registerMCPToolName(tool.name, {
-              connectionId: tool._connectionId,
-              toolName: tool._toolName,
-              approvalPolicy: tool._approvalPolicy,
-            });
-          }
-        }
         const $tools = tools.tools.map((tool: any) => {
           return this.makeTool(tool);
         });

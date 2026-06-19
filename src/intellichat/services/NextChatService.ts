@@ -15,6 +15,7 @@ import OpenAI from 'providers/OpenAI';
 import { IServiceProvider } from 'providers/types';
 import MCPServerApprovalPolicyDialog from 'renderer/components/MCPServerApprovalPolicyDialog';
 import useInspectorStore from 'stores/useInspectorStore';
+import useMCPStore from 'stores/useMCPStore';
 import { raiseError, stripHtmlTags } from 'utils/util';
 
 const debug = Debug('5ire:intellichat:NextChatService');
@@ -59,38 +60,6 @@ export default abstract class NextCharService {
   protected outputTokens: number = 0;
 
   protected traceTool: (chatId: string, label: string, msg: string) => void;
-
-  protected mcpToolNameMap = new Map<string, {
-    connectionId: string;
-    toolName: string;
-    approvalPolicy?: string;
-    type?: string;
-  }>();
-
-  protected registerMCPToolName(safeName: string, meta: {
-    connectionId: string;
-    toolName: string;
-    approvalPolicy?: string;
-    type?: string;
-  }) {
-    this.mcpToolNameMap.set(safeName, meta);
-  }
-
-  protected resolveMCPToolName(safeName: string) {
-    return this.mcpToolNameMap.get(safeName);
-  }
-
-  protected resolveMCPConnectionId(toolName: string): string {
-    const meta = this.resolveMCPToolName(toolName);
-    if (meta) {
-      return meta.connectionId;
-    }
-    const match = toolName.match(/^(t_[0-9a-f]+)--(.+)$/i);
-    if (match) {
-      return match[1];
-    }
-    return "";
-  }
 
   protected getSystemRoleName() {
     if (this.name === OpenAI.name) {
@@ -380,46 +349,7 @@ export default abstract class NextCharService {
         this.outputTokens += readResult.outputTokens;
       }
       if (readResult.tool) {
-        const toolMeta = this.resolveMCPToolName(readResult.tool.name);
-
-        let client: string;
-        let name: string;
-        let approvalPolicy: string | undefined;
-
-        if (toolMeta) {
-          client = toolMeta.connectionId;
-          name = toolMeta.toolName;
-          approvalPolicy = toolMeta.approvalPolicy;
-        } else {
-          const match = readResult.tool.name.match(/^(t_[0-9a-f]+)--(.+)$/i);
-          if (!match) {
-            const errorResult = {
-              isError: true,
-              content: [
-                {
-                  error: `Unknown tool ${readResult.tool.name} - invalid format`,
-                  code: 'tool_not_found',
-                  clientName: readResult.tool.name,
-                  toolName: readResult.tool.name,
-                },
-              ],
-            };
-            const messagesWithTool = [
-              ...messages,
-              ...(await this.makeToolMessages(
-                readResult.tool,
-                errorResult,
-                readResult.content,
-              )),
-            ] as IChatRequestMessage[];
-            await this.chat(messagesWithTool);
-            return;
-          }
-          client = match[1];
-          name = match[2];
-          approvalPolicy = undefined;
-        }
-
+        const [client, name] = readResult.tool.name.split('--');
         this.traceTool(chatId, name, '');
 
         // 生成唯一的请求ID
@@ -436,6 +366,9 @@ export default abstract class NextCharService {
         try {
           let toolCallsResult: any;
 
+          const servers = useMCPStore.getState().config.mcpServers;
+          const server = servers[client];
+
           const toolCallsCanclledResult = {
             isError: true,
             content: [
@@ -448,46 +381,47 @@ export default abstract class NextCharService {
             ],
           };
 
-          const effectiveApprovalPolicy = approvalPolicy || 'always';
-          switch (effectiveApprovalPolicy) {
-            case 'always': {
-              await MCPServerApprovalPolicyDialog.open({
-                toolName: client,
-                toolType: toolMeta?.type,
-                methodName: name,
-                parameters: readResult.tool.args,
-              }).catch(() => {
-                toolCallsResult = toolCallsCanclledResult;
-              });
-              break;
-            }
-            case 'once': {
-              const isAllowedKey = `APPROVAL_POLICY::${chatId}--${client}`;
-              const isAllowed = await window.electron.store.get(isAllowedKey);
-
-              if (typeof isAllowed !== 'boolean') {
-                const allow = await MCPServerApprovalPolicyDialog.open({
+          if (server?.approvalPolicy) {
+            switch (server.approvalPolicy || 'always') {
+              case 'always': {
+                await MCPServerApprovalPolicyDialog.open({
                   toolName: client,
-                  toolType: toolMeta?.type,
+                  toolType: server.type,
                   methodName: name,
                   parameters: readResult.tool.args,
-                })
-                  .then(() => true)
-                  .catch(() => false);
+                }).catch(() => {
+                  toolCallsResult = toolCallsCanclledResult;
+                });
+                break;
+              }
+              case 'once': {
+                const isAllowedKey = `APPROVAL_POLICY::${chatId}--${client}`;
+                const isAllowed = await window.electron.store.get(isAllowedKey);
 
-                await window.electron.store.set(isAllowedKey, allow);
+                if (typeof isAllowed !== 'boolean') {
+                  const allow = await MCPServerApprovalPolicyDialog.open({
+                    toolName: client,
+                    toolType: server.type,
+                    methodName: name,
+                    parameters: readResult.tool.args,
+                  })
+                    .then(() => true)
+                    .catch(() => false);
 
-                if (!allow) {
+                  await window.electron.store.set(isAllowedKey, allow);
+
+                  if (!allow) {
+                    toolCallsResult = toolCallsCanclledResult;
+                  }
+                } else if (isAllowed === false) {
                   toolCallsResult = toolCallsCanclledResult;
                 }
-              } else if (isAllowed === false) {
-                toolCallsResult = toolCallsCanclledResult;
-              }
 
-              break;
-            }
-            default: {
-              break;
+                break;
+              }
+              default: {
+                break;
+              }
             }
           }
 

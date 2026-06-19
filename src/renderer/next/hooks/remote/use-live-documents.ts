@@ -1,13 +1,13 @@
+import { useEffect } from "react";
 import { clear, suspend } from "suspend-react";
 import { useStore } from "zustand";
-import { createStateStreamStore } from "@/renderer/next/hooks/remote/utils";
+import { createStateStreamStore, type StreamStore } from "@/renderer/next/hooks/remote/utils";
 
 const key = crypto.randomUUID();
 
-// TODO: Need to manually close unused LiveDocuments to avoid memory pressure from excessive subscriptions
 export const useLiveDocuments = (collectionId: string) => {
+  const keys = [key, collectionId];
   const store = suspend(async () => {
-    const keys = [key, collectionId];
     return createStateStreamStore({
       streamLoader: () => window.bridge.documentManager.liveDocuments(collectionId),
       onDone: () => {
@@ -16,7 +16,15 @@ export const useLiveDocuments = (collectionId: string) => {
     }).then(({ instance }) => {
       return instance;
     });
-  }, [key, collectionId]);
+  }, keys);
+
+  useEffect(() => {
+    const currentKeys = [key, collectionId];
+    return () => {
+      (store as StreamStore<unknown>).destroy?.().catch(() => {});
+      clear(currentKeys);
+    };
+  }, [store, collectionId]);
 
   return useStore(store);
 };

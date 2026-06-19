@@ -46,7 +46,6 @@ export class MCPConnectionsManager extends Stateful<MCPConnectionsManager.State>
   #database = Container.inject(Database);
   #emitter = Emitter.create<MCPConnectionsManager.Events>();
   #serversManager = Container.inject(MCPServersManager);
-  #shortIdIndex = new Map<number, string>();
 
   /**
    * The emitter for MCP server events.
@@ -111,8 +110,6 @@ export class MCPConnectionsManager extends Stateful<MCPConnectionsManager.State>
         return logger.info(`Server already connected: ${server.id} ("${server.endpoint}")`);
       }
     }
-
-    this.#shortIdIndex.set(server.shortId, server.id);
 
     logger.info("Connecting to mcp server:", server);
 
@@ -200,7 +197,6 @@ export class MCPConnectionsManager extends Stateful<MCPConnectionsManager.State>
     });
 
     controller.signal.addEventListener("abort", () => {
-      this.#shortIdIndex.delete(server.shortId);
       this.update((draft) => {
         draft.connections.delete(server.id);
       });
@@ -224,8 +220,6 @@ export class MCPConnectionsManager extends Stateful<MCPConnectionsManager.State>
       if (connection.status === "connecting") {
         connection.controller.abort();
       }
-
-      this.#shortIdIndex.delete(connection.serverSnapshot.shortId);
     }
 
     this.update((draft) => {
@@ -261,7 +255,6 @@ export class MCPConnectionsManager extends Stateful<MCPConnectionsManager.State>
           projectId: schema.server.projectId,
           config: schema.server.config,
           endpoint: schema.server.endpoint,
-          approvalPolicy: schema.server.approvalPolicy,
         }),
       )
       .from(schema.server)
@@ -285,7 +278,6 @@ export class MCPConnectionsManager extends Stateful<MCPConnectionsManager.State>
               projectId: change.projectId,
               config: change.config,
               endpoint: change.endpoint,
-              approvalPolicy: change.approvalPolicy,
               shortId: this.#serversManager.getShortId(change.id),
             };
 
@@ -354,17 +346,13 @@ export class MCPConnectionsManager extends Stateful<MCPConnectionsManager.State>
 
     return connection;
   }
-
-  getConnectionIdByShortId(shortId: number): string | undefined {
-    return this.#shortIdIndex.get(shortId);
-  }
 }
 
 export namespace MCPConnectionsManager {
   /**
    * Represents a snapshot of an MCP server.
    */
-  export type ServerSnapshot = Pick<Server, "id" | "transport" | "projectId" | "config" | "endpoint" | "approvalPolicy"> & {
+  export type ServerSnapshot = Pick<Server, "id" | "transport" | "projectId" | "config" | "endpoint"> & {
     shortId: number;
   };
 

@@ -90,7 +90,7 @@ export default class GoogleChatService
         content.map((block: MCPContentBlock) =>
           MCPContentBlockConverter.convert(block, (uri) => {
             return window.electron.mcp
-              .readResource(this.resolveMCPConnectionId(tool.name), uri)
+              .readResource(tool.name.split('--')[0], uri)
               .then((result) => {
                 if (result.isError) {
                   return [];
@@ -372,15 +372,6 @@ export default class GoogleChatService
     if (this.isToolsEnabled()) {
       const tools = await window.electron.mcp.listTools();
       if (tools) {
-        for (const tool of tools.tools) {
-          if (tool._connectionId) {
-            this.registerMCPToolName(tool.name, {
-              connectionId: tool._connectionId,
-              toolName: tool._toolName,
-              approvalPolicy: tool._approvalPolicy,
-            });
-          }
-        }
         // eslint-disable-next-line no-underscore-dangle
         const _tools = tools.tools
           .filter((tool: any) => !this.usedToolNames.includes(tool.name))

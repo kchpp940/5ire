@@ -50,17 +50,6 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
       }
     } catch {}
 
-    try {
-      const match = uri.match(/^tool:([^/]+)\/(.+)$/);
-      if (match) {
-        const connectionId = decodeURIComponent(match[1]);
-        const name = decodeURIComponent(match[2]);
-        if (connectionId && name) {
-          return { connectionId, name };
-        }
-      }
-    } catch {}
-
     logger.warning("Invalid tool URI", uri);
 
     return null;
@@ -115,7 +104,7 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
               return {
                 ...tool,
                 ...{
-                  uri: this.#formatToolURI(id, tool),
+                  uri: this.#formatToolURI(connection.serverSnapshot.shortId.toString(16), tool),
                 },
               };
             }),
@@ -293,32 +282,19 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
 
   #legacyCallAbortControllers = new Map<string, AbortController>();
 
-  #resolveClientToConnectionId(client: string): string | undefined {
-    if (this.#connectionsManager.state.connections.has(client)) {
-      return client;
-    }
-
-    const shortIdMatch = client.match(/^t_([0-9a-f]+)$/i);
-    if (shortIdMatch) {
-      const shortId = parseInt(shortIdMatch[1], 16);
-      if (!Number.isNaN(shortId)) {
-        return this.#connectionsManager.getConnectionIdByShortId(shortId);
-      }
-    }
-
-    return undefined;
-  }
-
   async legacyCall(options: MCPToolsManager.LegacyCallOptions) {
     const controllerId = options.requestId || crypto.randomUUID();
     const controller = new AbortController();
 
     this.#legacyCallAbortControllers.set(controllerId, controller);
 
-    const connectionId = this.#resolveClientToConnectionId(options.client);
-    const connection = connectionId
-      ? this.#connectionsManager.state.connections.get(connectionId)
-      : undefined;
+    let connection: MCPConnectionsManager.Connection | undefined;
+
+    for (const conn of this.#connectionsManager.state.connections.values()) {
+      if (`t_${conn.serverSnapshot.shortId.toString(16).padStart(2, "0")}` === options.client) {
+        connection = conn;
+      }
+    }
 
     if (!connection || connection.status !== "connected") {
       return {
@@ -371,17 +347,13 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
   async legacyList() {
     const bundles = Array.from(this.state.collections.entries()).map(([id, collection]) => {
       if (collection.status === "loaded") {
-        const shortIdPadded = collection.server.shortId.toString(16).padStart(2, "0");
         return {
           client: id,
           tools: collection.tools.map((tool) => {
             return {
               ...tool,
               ...{
-                name: `t_${shortIdPadded}--${tool.name}`,
-                _connectionId: id,
-                _toolName: tool.name,
-                _approvalPolicy: collection.server.approvalPolicy,
+                name: `t_${collection.server.shortId.toString(16).padStart(2, "0")}--${tool.name}`,
               },
             };
           }),
