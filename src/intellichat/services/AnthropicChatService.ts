@@ -251,6 +251,21 @@ export default class AnthropicChatService extends NextChatService implements INe
     ] as IChatRequestMessage[];
   }
 
+  protected override async buildToolResultMessages(
+    toolResults: Array<{ tool: ITool; result: any }>,
+  ): Promise<IChatRequestMessage[]> {
+    const allBlocks: any[] = [];
+    for (const { tool, result } of toolResults) {
+      const msgs = await this.makeToolResultMessages(tool, result);
+      for (const msg of msgs) {
+        if (msg.role === "user" && Array.isArray(msg.content)) {
+          allBlocks.push(...(msg.content as any[]));
+        }
+      }
+    }
+    return [{ role: "user", content: allBlocks }] as IChatRequestMessage[];
+  }
+
   /**
    * Converts an MCP tool definition to Anthropic tool format.
    * Transforms the tool schema to match Anthropic's expected structure.

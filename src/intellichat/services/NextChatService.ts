@@ -111,6 +111,17 @@ export default abstract class NextCharService {
     toolResult: any,
   ): IChatRequestMessage[] | Promise<IChatRequestMessage[]>;
 
+  protected async buildToolResultMessages(
+    toolResults: Array<{ tool: ITool; result: any }>,
+  ): Promise<IChatRequestMessage[]> {
+    const allMsgs: IChatRequestMessage[] = [];
+    for (const { tool, result } of toolResults) {
+      const msgs = await this.makeToolResultMessages(tool, result);
+      allMsgs.push(...msgs);
+    }
+    return allMsgs;
+  }
+
   protected abstract makeTool(tool: IMCPTool): IOpenAITool | IAnthropicTool | IGoogleTool;
 
   protected abstract makePayload(messages: IChatRequestMessage[], msgId?: string): Promise<IChatRequestPayload>;
@@ -331,6 +342,8 @@ export default abstract class NextCharService {
         const assistantMsg = this.makeAssistantMessageWithTools(readResult.tools, readResult.content);
         toolMessagesList.push(assistantMsg);
 
+        const toolResults: Array<{ tool: ITool; result: any }> = [];
+
         for (const tool of readResult.tools) {
           const [client, name] = tool.name.split("--");
           this.traceTool(chatId, name, "");
@@ -425,13 +438,15 @@ export default abstract class NextCharService {
               this.traceTool(chatId, "response", JSON.stringify(toolCallsResult, null, 2));
             }
 
-            const toolMsgs = await this.makeToolResultMessages(tool, toolCallsResult);
-            toolMessagesList.push(...toolMsgs);
+            toolResults.push({ tool, result: toolCallsResult });
           } catch (error) {
             this.abortController.signal.removeEventListener("abort", abortHandler);
             throw error;
           }
         }
+
+        const resultMsgs = await this.buildToolResultMessages(toolResults);
+        toolMessagesList.push(...resultMsgs);
 
         await this.chat(toolMessagesList);
       } else {
