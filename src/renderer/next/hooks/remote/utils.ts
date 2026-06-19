@@ -192,11 +192,11 @@ export const useStreamStore = <T>(options: UseStreamStoreOptions<T>) => {
       retainStore(key);
     }
     return () => {
-      clear(key);
       if (shared) {
         const remaining = releaseStore(key);
         if (remaining > 0) return;
       }
+      clear(key);
       store.destroy?.().catch(() => {});
     };
   }, [store, shared, key]);
@@ -222,11 +222,11 @@ export const useStreamStoreWithSelector = <T, S>(options: UseStreamStoreOptions<
       retainStore(key);
     }
     return () => {
-      clear(key);
       if (shared) {
         const remaining = releaseStore(key);
         if (remaining > 0) return;
       }
+      clear(key);
       store.destroy?.().catch(() => {});
     };
   }, [store, shared, key]);
@@ -256,11 +256,11 @@ export const useStreamStoreRef = <T>(options: UseStreamStoreOptions<T>) => {
     }
     const currentStore = ref.current;
     return () => {
-      clear(key);
       if (shared) {
         const remaining = releaseStore(key);
         if (remaining > 0) return;
       }
+      clear(key);
       currentStore.destroy?.().catch(() => {});
     };
   }, [shared, key]);
