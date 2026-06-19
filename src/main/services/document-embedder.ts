@@ -101,6 +101,7 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
 
     let controller: AbortController | undefined;
     let tempFile: string | undefined;
+    let url: string | undefined;
 
     this.update((draft) => {
       const it = draft.processingDocuments[id];
@@ -118,8 +119,19 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
     await this.#cleanupTempFile(tempFile);
 
     if (reason === "deleted") {
+      this.#emitter.emit("document-embed-deleted", { id });
       return;
     }
+
+    await client
+      .select({ url: schema.document.url })
+      .from(schema.document)
+      .where(eq(schema.document.id, id))
+      .limit(1)
+      .then(([doc]) => {
+        url = doc?.url;
+      })
+      .catch(() => {});
 
     await client
       .update(schema.document)
@@ -132,6 +144,12 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
       .catch((error) => {
         logger.error(`Failed to update document ${id} status after cancel (${reason}):`, error);
       });
+
+    if (reason === "cancelled") {
+      this.#emitter.emit("document-embed-cancelled", { id, url: url || "" });
+    } else if (reason === "model-unavailable") {
+      this.#emitter.emit("document-embed-interrupted", { id, url: url || "" });
+    }
   }
 
   async cancelDocumentProcessing(id: string) {
@@ -424,6 +442,17 @@ export namespace DocumentEmbedder {
       id: string;
       url: string;
       message: string;
+    };
+    "document-embed-cancelled": {
+      id: string;
+      url: string;
+    };
+    "document-embed-deleted": {
+      id: string;
+    };
+    "document-embed-interrupted": {
+      id: string;
+      url: string;
     };
   };
 
