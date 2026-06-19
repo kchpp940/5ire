@@ -31,6 +31,13 @@ export class EmbedderBridge extends Bridge.define("embedder", () => {
           } as const;
         }
 
+        if (status.type === "unavailable") {
+          return {
+            type: "unavailable",
+            reason: status.reason,
+          } as const;
+        }
+
         return status;
       };
 

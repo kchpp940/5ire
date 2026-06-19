@@ -1,18 +1,11 @@
 import { Button, ProgressBar, Spinner } from "@fluentui/react-components";
-import { CheckmarkCircle16Filled, CheckmarkCircle20Filled } from "@fluentui/react-icons";
+import { CheckmarkCircle16Filled, CheckmarkCircle20Filled, DismissCircleColor } from "@fluentui/react-icons";
 import useToast from "hooks/useToast";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import ConfirmDialog from "renderer/components/ConfirmDialog";
 import { useEmbedder } from "@/renderer/next/hooks/remote/use-embedder";
 
-/**
- * React component for managing embedding model settings.
- * Provides functionality to download, manage, and remove the BGE-M3 embedding model
- * and its associated configuration files.
- *
- * @returns {JSX.Element} The embedding settings interface
- */
 export default function EmbedSettings() {
   const { t } = useTranslation();
 
@@ -29,7 +22,6 @@ export default function EmbedSettings() {
     window.bridge.embedder.removeModel().catch((e) => {
       //
     });
-    // removeModel();
     notifySuccess(t("Settings.Embeddings.Notification.ModelDeleted"));
   };
 
@@ -41,13 +33,24 @@ export default function EmbedSettings() {
     window.bridge.embedder.cancelDownloadModel().catch(console.log);
   };
 
+  const isRetry =
+    embedder.status.type === "unavailable" &&
+    (embedder.status.reason === "download-cancelled" ||
+      embedder.status.reason === "download-failed" ||
+      embedder.status.reason === "pipeline-init-failed" ||
+      embedder.status.reason === "model-partially-missing");
+
   const renderModelName = () => {
     return (
       <div className="flex flex-start items-center gap-2">
         <span>{t("Common.Model")}: </span>
         <span>{embedder.model}</span>
-        <span>{embedder.status.type === "ready" && <CheckmarkCircle20Filled className="text-green-500" />}</span>
-        <span>{embedder.status.type === "initializing" && <Spinner size="extra-tiny" />}</span>
+        {embedder.status.type === "ready" && <CheckmarkCircle20Filled className="text-green-500" />}
+        {embedder.status.type === "initializing" && <Spinner size="extra-tiny" />}
+        {embedder.status.type === "unavailable" &&
+          (embedder.status.reason === "download-failed" || embedder.status.reason === "pipeline-init-failed") && (
+            <DismissCircleColor className="text-red-500" />
+          )}
       </div>
     );
   };
@@ -66,22 +69,48 @@ export default function EmbedSettings() {
             {t("Common.Cancel")}
           </Button>
         );
+      case "initializing":
+        return <Spinner size="tiny" />;
       case "unavailable":
         return (
           <Button appearance="primary" size="small" onClick={handleDownload}>
-            {t("Common.Download")}
+            {isRetry ? t("Common.Retry") : t("Common.Download")}
           </Button>
         );
+      default:
+        return null;
     }
   };
 
   const renderTips = () => {
+    if (embedder.status.type === "ready") {
+      return (
+        <div className="tips mt-2 mb-2">{t("Settings.Embeddings.Tip.ModelExists")}</div>
+      );
+    }
+
+    if (embedder.status.type === "initializing") {
+      return (
+        <div className="tips mt-2 mb-2">{t("Settings.Embeddings.Tip.Initializing")}</div>
+      );
+    }
+
+    if (embedder.status.type === "unavailable") {
+      const tipMap: Record<string, string> = {
+        "download-cancelled": "Settings.Embeddings.Tip.DownloadCancelled",
+        "download-failed": "Settings.Embeddings.Tip.DownloadFailed",
+        "pipeline-init-failed": "Settings.Embeddings.Tip.PipelineInitFailed",
+        "model-partially-missing": "Settings.Embeddings.Tip.ModelPartiallyMissing",
+        "model-missing": "Settings.Embeddings.Tip.ModelRequired",
+      };
+
+      const key = tipMap[embedder.status.reason] || "Settings.Embeddings.Tip.ModelRequired";
+
+      return <div className="tips mt-2 mb-2">{t(key)}</div>;
+    }
+
     return (
-      <div className="tips mt-2 mb-2">
-        {embedder.status.type === "ready"
-          ? t("Settings.Embeddings.Tip.ModelExists")
-          : t("Settings.Embeddings.Tip.ModelRequired")}
-      </div>
+      <div className="tips mt-2 mb-2">{t("Settings.Embeddings.Tip.ModelRequired")}</div>
     );
   };
 

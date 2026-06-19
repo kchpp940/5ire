@@ -1,24 +1,22 @@
-import { clear, preload } from "suspend-react";
-import { useStreamStore } from "@/renderer/next/hooks/remote/utils";
+import { clear, preload, suspend } from "suspend-react";
+import { useStore } from "zustand";
+import { createStateStreamStore } from "@/renderer/next/hooks/remote/utils";
 
 const key = crypto.randomUUID();
-const cacheKey = [key];
-const streamLoader = window.bridge.documentEmbedder.createStateStream;
 
-preload(async () => {
-  const { createStateStreamStore } = await import("@/renderer/next/hooks/remote/utils");
+const createStore = async () => {
   return createStateStreamStore({
-    streamLoader,
+    streamLoader: window.bridge.documentEmbedder.createStateStream,
     onDone: () => {
-      clear(cacheKey);
+      clear([key]);
     },
-  }).then(({ instance }) => instance);
-}, cacheKey);
+  }).then(({ instance }) => {
+    return instance;
+  });
+};
+
+preload(createStore, [key]);
 
 export const useDocumentEmbedder = () => {
-  return useStreamStore({
-    streamLoader,
-    key: cacheKey,
-    shared: true,
-  });
+  return useStore(suspend(createStore, [key]));
 };

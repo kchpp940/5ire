@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { asError } from "catch-unknown";
-import { asc, eq, not } from "drizzle-orm";
+import { asc, eq, inArray, not } from "drizzle-orm";
 import { createReadStream, createWriteStream } from "fs-extra";
 import { Database } from "@/main/database";
 import { Container } from "@/main/internal/container";
@@ -409,6 +409,8 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
 
     this.#embedder.subscribe((prev, next) => {
       if (prev.status.type === "ready" && next.status.type !== "ready") {
+        const ids = Object.keys(this.state.processingDocuments);
+
         this.update((draft) => {
           for (const [_, it] of Object.entries(draft.processingDocuments)) {
             it.controller.abort();
@@ -416,8 +418,22 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
 
           draft.processingDocuments = {};
         });
+
+        if (ids.length > 0) {
+          client
+            .update(schema.document)
+            .set({
+              status: "pending",
+            })
+            .where(inArray(schema.document.id, ids))
+            .execute()
+            .catch((error) => {
+              this.#logger.error("Failed to reset processing documents to pending:", error);
+            });
+        }
       }
       if (prev.status.type !== "ready" && next.status.type === "ready") {
+        this.#empty = false;
         this.#pull();
       }
     });

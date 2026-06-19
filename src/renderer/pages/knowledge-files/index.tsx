@@ -7,6 +7,7 @@ import {
   DialogSurface,
   DialogTitle,
   DialogTrigger,
+  Spinner,
 } from "@fluentui/react-components";
 import { asError } from "catch-unknown";
 import { useMemo } from "react";
@@ -26,7 +27,6 @@ const ImportButton = () => {
   const toast = useToast();
   const navigate = useNavigate();
   const embedder = useEmbedder();
-  const ready = embedder.status.type === "ready";
 
   const handleImport = () => {
     if (id) {
@@ -37,11 +37,36 @@ const ImportButton = () => {
     }
   };
 
-  if (ready) {
+  if (embedder.status.type === "ready") {
     return (
       <Button appearance="primary" onClick={() => handleImport()}>
         {t("Common.Import")}
       </Button>
+    );
+  }
+
+  if (embedder.status.type === "downloading" || embedder.status.type === "initializing") {
+    return (
+      <Dialog>
+        <DialogTrigger disableButtonEnhancement>
+          <Button appearance="primary" icon={<Spinner size="extra-tiny" />}>
+            {t("Common.Import")}
+          </Button>
+        </DialogTrigger>
+        <DialogSurface>
+          <DialogBody>
+            <DialogTitle>{t("Knowledge.FileDrawer.DialogTitle.EmbeddingModelIsDownloading")}</DialogTitle>
+            <DialogContent>
+              <p>{t("Knowledge.FileDrawer.DialogContent.EmbeddingModelIsDownloading")}</p>
+            </DialogContent>
+            <DialogActions>
+              <DialogTrigger disableButtonEnhancement>
+                <Button appearance="secondary">{t("Common.OK")}</Button>
+              </DialogTrigger>
+            </DialogActions>
+          </DialogBody>
+        </DialogSurface>
+      </Dialog>
     );
   }
 
