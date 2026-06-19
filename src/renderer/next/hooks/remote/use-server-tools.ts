@@ -1,24 +1,23 @@
-import { clear, suspend } from "suspend-react";
-import { useStore } from "zustand";
-import { createStateStreamStore } from "@/renderer/next/hooks/remote/utils";
+import { useStreamStore, useStreamStoreWithSelector } from "@/renderer/next/hooks/remote/utils";
 
 const key = crypto.randomUUID();
+const streamLoader = window.bridge.mcpConnectionsManager.tool.createStateStream;
 
-const createStore = async () => {
-  return createStateStreamStore({
-    streamLoader: window.bridge.mcpConnectionsManager.tool.createStateStream,
-    onDone: () => {
-      clear([key]);
-    },
-  }).then(({ instance }) => {
-    return instance;
+export const useServerTools = () => {
+  return useStreamStore({
+    streamLoader,
+    key: [key],
+    shared: false,
   });
 };
 
-export const useServerTools = () => {
-  return useStore(suspend(createStore, [key]));
-};
-
 export const useServerToolsWithSelector = <T>(selector: (raw: ReturnType<typeof useServerTools>) => T) => {
-  return useStore(suspend(createStore, [key]), selector);
+  return useStreamStoreWithSelector(
+    {
+      streamLoader,
+      key: [key],
+      shared: false,
+    },
+    selector,
+  );
 };

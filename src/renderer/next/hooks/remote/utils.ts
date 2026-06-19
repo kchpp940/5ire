@@ -1,7 +1,11 @@
+import { useEffect, useRef } from "react";
+import { clear, suspend } from "suspend-react";
+import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import type { Bridge } from "@/main/internal/bridge";
 
 const activeStores = new Set<StreamStore<unknown>>();
+const refCounts = new Map<string, number>();
 
 export const registerStreamStore = <T>(store: StreamStore<T>) => {
   activeStores.add(store);
@@ -15,11 +19,38 @@ export const unregisterStreamStore = <T>(store: StreamStore<T>) => {
 export const destroyAllStreamStores = async () => {
   const stores = Array.from(activeStores);
   activeStores.clear();
+  refCounts.clear();
   await Promise.allSettled(stores.map((store) => store.destroy()));
 };
 
 export const getActiveStreamStoreCount = () => {
   return activeStores.size;
+};
+
+const getKeyString = (key: readonly unknown[]) => {
+  return key.map((k) => String(k)).join("|");
+};
+
+const retainStore = (key: readonly unknown[]) => {
+  const keyStr = getKeyString(key);
+  const count = refCounts.get(keyStr) ?? 0;
+  refCounts.set(keyStr, count + 1);
+  return count + 1;
+};
+
+const releaseStore = (key: readonly unknown[]) => {
+  const keyStr = getKeyString(key);
+  const count = refCounts.get(keyStr) ?? 0;
+  if (count <= 1) {
+    refCounts.delete(keyStr);
+    return 0;
+  }
+  refCounts.set(keyStr, count - 1);
+  return count - 1;
+};
+
+const _getRefCount = (key: readonly unknown[]) => {
+  return refCounts.get(getKeyString(key)) ?? 0;
 };
 
 /**
@@ -133,4 +164,102 @@ export const createStateStreamStore = async <T>(options: StreamStoreOptions<T>) 
   });
 
   return { instance, stream, destroy };
+};
+
+export type UseStreamStoreOptions<T> = {
+  streamLoader: () => Promise<Bridge.ReadableStreamProxy<T>>;
+  key: readonly unknown[];
+  autoRegister?: boolean;
+  shared?: boolean;
+};
+
+export const useStreamStore = <T>(options: UseStreamStoreOptions<T>) => {
+  const { streamLoader, key, autoRegister, shared = false } = options;
+  const store = suspend(async () => {
+    return createStateStreamStore({
+      streamLoader,
+      autoRegister,
+      onDone: () => {
+        clear(key);
+      },
+    }).then(({ instance }) => instance);
+  }, key) as StreamStore<T>;
+
+  useEffect(() => {
+    if (shared) {
+      retainStore(key);
+    }
+    return () => {
+      if (shared) {
+        const remaining = releaseStore(key);
+        if (remaining > 0) return;
+      }
+      store.destroy?.().catch(() => {});
+      clear(key);
+    };
+  }, [store, ...key, shared, key]);
+
+  return useStore(store);
+};
+
+export const useStreamStoreWithSelector = <T, S>(options: UseStreamStoreOptions<T>, selector: (state: T) => S) => {
+  const { streamLoader, key, autoRegister, shared = false } = options;
+  const store = suspend(async () => {
+    return createStateStreamStore({
+      streamLoader,
+      autoRegister,
+      onDone: () => {
+        clear(key);
+      },
+    }).then(({ instance }) => instance);
+  }, key) as StreamStore<T>;
+
+  useEffect(() => {
+    if (shared) {
+      retainStore(key);
+    }
+    return () => {
+      if (shared) {
+        const remaining = releaseStore(key);
+        if (remaining > 0) return;
+      }
+      store.destroy?.().catch(() => {});
+      clear(key);
+    };
+  }, [store, ...key, shared, key]);
+
+  return useStore(store, selector);
+};
+
+export const useStreamStoreRef = <T>(options: UseStreamStoreOptions<T>) => {
+  const { streamLoader, key, autoRegister, shared = false } = options;
+  const store = suspend(async () => {
+    return createStateStreamStore({
+      streamLoader,
+      autoRegister,
+      onDone: () => {
+        clear(key);
+      },
+    }).then(({ instance }) => instance);
+  }, key) as StreamStore<T>;
+
+  const ref = useRef(store);
+  ref.current = store;
+
+  useEffect(() => {
+    if (shared) {
+      retainStore(key);
+    }
+    const currentStore = ref.current;
+    return () => {
+      if (shared) {
+        const remaining = releaseStore(key);
+        if (remaining > 0) return;
+      }
+      currentStore.destroy?.().catch(() => {});
+      clear(key);
+    };
+  }, [shared, key]);
+
+  return ref;
 };
