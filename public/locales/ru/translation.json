@@ -384,5 +384,6 @@
   "Updater.ManualDownload": "Скачать вручную",
   "Common.GoSettings": "Перейти в настройки",
   "Knowledge.Confirmation.DeleteDocument": "Документ и все связанные с ним данные будут удалены, и эта операция необратима.",
-  "Knowledge.Notification.DocumentDeleted": "Документ был удален."
+  "Knowledge.Notification.DocumentDeleted": "Документ был удален.",
+  "Knowledge.Notification.DocumentRetryStarted": "Повторная обработка неудачных документов..."
 }

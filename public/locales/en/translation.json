@@ -385,6 +385,7 @@
   "Common.GoSettings": "Go to settings",
   "Knowledge.Confirmation.DeleteDocument": "The document and all associated data will be deleted and the operation is irrevocable.",
   "Knowledge.Notification.DocumentDeleted": "The document has been removed.",
+  "Knowledge.Notification.DocumentRetryStarted": "Retrying failed documents...",
   "Tools.Transport": "Transport",
   "Common.URLInvalid": "URL is invalid",
   "Common.Active": "Active",

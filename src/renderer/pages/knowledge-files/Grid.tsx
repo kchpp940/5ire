@@ -18,6 +18,8 @@ import {
   useScrollbarWidth,
 } from "@fluentui/react-components";
 import {
+  ArrowClockwiseFilled,
+  ArrowClockwiseRegular,
   bundleIcon,
   CircleHintFilled,
   DeleteFilled,
@@ -48,6 +50,8 @@ import { useLiveDocuments } from "@/renderer/next/hooks/remote/use-live-document
 const DeleteIcon = bundleIcon(DeleteFilled, DeleteRegular);
 
 const MoreHorizontalIcon = bundleIcon(MoreHorizontalFilled, MoreHorizontalRegular);
+
+const RetryIcon = bundleIcon(ArrowClockwiseFilled, ArrowClockwiseRegular);
 
 type StatusIndicatorProps = {
   item: Pick<Document, "status" | "id" | "error">;
@@ -150,6 +154,11 @@ export default function Grid() {
     }
   };
 
+  const handleRetryFailed = () => {
+    window.bridge.documentEmbedder.retryFailed().catch(console.error);
+    notifySuccess(t("Knowledge.Notification.DocumentRetryStarted"));
+  };
+
   /**
    * Configuration for the data grid columns including name, last updated, and number of files.
    * Each column defines sorting behavior, header rendering, and cell content rendering.
@@ -205,6 +214,11 @@ export default function Grid() {
                 </MenuTrigger>
                 <MenuPopover>
                   <MenuList>
+                    {item.status === "failed" && (
+                      <MenuItem icon={<RetryIcon />} onClick={handleRetryFailed}>
+                        {t("Common.Retry")}{" "}
+                      </MenuItem>
+                    )}
                     <MenuItem icon={<DeleteIcon />} onClick={() => handleDelete(item.id)}>
                       {t("Common.Delete")}{" "}
                     </MenuItem>

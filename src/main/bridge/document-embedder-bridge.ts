@@ -6,6 +6,9 @@ export class DocumentEmbedderBridge extends Bridge.define("document-embedder", (
   const service = Container.inject(DocumentEmbedder);
 
   return {
+    retryFailed: async () => {
+      return service.retryFailed();
+    },
     createStateStream() {
       return service.createStream((state) => {
         return {
