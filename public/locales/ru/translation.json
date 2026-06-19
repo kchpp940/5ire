@@ -83,6 +83,7 @@
   "Common.StopGenerating": "Остановить генерацию",
   "Common.Download": "Скачать",
   "Common.Retry": "Повторить",
+  "Common.RetryAll": "Повторить все",
   "Common.Cancelling": "Отмена",
   "Common.Model": "Модель",
   "Common.Embeddings": "Вложения",
@@ -385,5 +386,6 @@
   "Common.GoSettings": "Перейти в настройки",
   "Knowledge.Confirmation.DeleteDocument": "Документ и все связанные с ним данные будут удалены, и эта операция необратима.",
   "Knowledge.Notification.DocumentDeleted": "Документ был удален.",
-  "Knowledge.Notification.DocumentRetryStarted": "Повторная обработка неудачных документов..."
+  "Knowledge.Notification.DocumentRetryStarted": "Повторная обработка неудачного документа...",
+  "Knowledge.Notification.CollectionRetryStarted": "Повторная обработка всех неудачных документов в этой коллекции..."
 }

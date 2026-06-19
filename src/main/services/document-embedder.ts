@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { asError } from "catch-unknown";
-import { asc, eq, inArray, not } from "drizzle-orm";
+import { and, asc, eq, inArray, not } from "drizzle-orm";
 import { createReadStream, createWriteStream } from "fs-extra";
 import { Database } from "@/main/database";
 import { Container } from "@/main/internal/container";
@@ -365,13 +365,51 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
   }
 
   /**
-   * Retry failed documents
-   * - Reset all failed documents to pending status
+   * Retry a single failed document
+   * - Reset the specified failed document to pending status
    * - Then resume processing
    *
-   * Can be called externally to trigger retry of all failed documents
+   * Called by UI when user clicks "retry" on a specific failed document
+   *
+   * @param id Document ID to retry
    */
-  async retryFailed() {
+  async retryDocument(id: string) {
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+    const logger = this.#logger.scope("RetryDocument");
+
+    if (this.#embedder.state.status.type !== "ready") {
+      logger.warning("Cannot retry document: embedder is not ready");
+      return;
+    }
+
+    await client
+      .update(schema.document)
+      .set({
+        status: "pending",
+        error: null,
+      })
+      .where(and(eq(schema.document.id, id), eq(schema.document.status, "failed")))
+      .execute()
+      .catch((error) => {
+        logger.error("Failed to reset failed document to pending:", error);
+      });
+
+    this.#resume();
+  }
+
+  /**
+   * Retry failed documents
+   * - Reset failed documents to pending status
+   * - If collectionId is provided, only retry failed documents in that collection
+   * - If collectionId is not provided, retry all failed documents
+   * - Then resume processing
+   *
+   * Can be called externally to trigger retry of failed documents
+   *
+   * @param collectionId Optional collection ID to scope the retry operation
+   */
+  async retryFailed(collectionId?: string) {
     const client = this.#database.client;
     const schema = this.#database.schema;
     const logger = this.#logger.scope("RetryFailed");
@@ -381,12 +419,17 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
       return;
     }
 
+    const whereClause = collectionId
+      ? and(eq(schema.document.status, "failed"), eq(schema.document.collectionId, collectionId))
+      : eq(schema.document.status, "failed");
+
     await client
       .update(schema.document)
       .set({
         status: "pending",
+        error: null,
       })
-      .where(eq(schema.document.status, "failed"))
+      .where(whereClause)
       .execute()
       .catch((error) => {
         logger.error("Failed to reset failed documents to pending:", error);

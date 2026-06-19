@@ -154,10 +154,19 @@ export default function Grid() {
     }
   };
 
-  const handleRetryFailed = () => {
-    window.bridge.documentEmbedder.retryFailed().catch(console.error);
+  const handleRetryDocument = (id: string) => {
+    window.bridge.documentEmbedder.retryDocument(id).catch(console.error);
     notifySuccess(t("Knowledge.Notification.DocumentRetryStarted"));
   };
+
+  const handleRetryAllFailed = () => {
+    if (id) {
+      window.bridge.documentEmbedder.retryFailed(id).catch(console.error);
+      notifySuccess(t("Knowledge.Notification.CollectionRetryStarted"));
+    }
+  };
+
+  const failedDocs = useMemo(() => items.filter((it) => it.status === "failed"), [items]);
 
   /**
    * Configuration for the data grid columns including name, last updated, and number of files.
@@ -215,7 +224,7 @@ export default function Grid() {
                 <MenuPopover>
                   <MenuList>
                     {item.status === "failed" && (
-                      <MenuItem icon={<RetryIcon />} onClick={handleRetryFailed}>
+                      <MenuItem icon={<RetryIcon />} onClick={() => handleRetryDocument(item.id)}>
                         {t("Common.Retry")}{" "}
                       </MenuItem>
                     )}
@@ -259,6 +268,13 @@ export default function Grid() {
 
   return (
     <div className="w-full">
+      {failedDocs.length > 0 && (
+        <div className="flex items-center gap-2 mb-2">
+          <Button appearance="subtle" size="small" icon={<RetryIcon />} onClick={handleRetryAllFailed}>
+            {t("Common.RetryAll")} ({failedDocs.length})
+          </Button>
+        </div>
+      )}
       <DataGrid items={items} columns={columns} sortable size="small" className="w-full" getRowId={(item) => item.id}>
         <DataGridHeader style={{ paddingRight: scrollbarWidth }}>
           <DataGridRow>
