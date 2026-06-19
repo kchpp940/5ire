@@ -1,9 +1,24 @@
-import type { IChatResponseMessage } from "intellichat/types";
-import { extractFirstLevelBrackets } from "utils/util";
-import BaseReader from "./BaseReader";
-import type { IReadResult, ITool } from "./IChatReader";
+import Debug from 'debug';
+import { IChatResponseMessage } from 'intellichat/types';
+import { extractFirstLevelBrackets } from 'utils/util';
+import BaseReader from './BaseReader';
+import { IReadResult, ITool } from './IChatReader';
 
+const debug = Debug('5ire:intellichat:GoogleReader');
+
+/**
+ * GoogleReader handles streaming responses from Google's Gemini API.
+ * It parses Google's specific response format which uses a candidates array
+ * and functionCall structure for tool calls.
+ */
 export default class GoogleReader extends BaseReader {
+  /**
+   * Parses a Google API response chunk into a structured message.
+   * Google responses contain a candidates array with content parts and usage metadata.
+   * Returns empty content with token counts if no candidates are present.
+   * @param chunk - The JSON string chunk to parse
+   * @returns Parsed chat response message with content, tokens, and tool calls
+   */
   protected parseReply(chunk: string): IChatResponseMessage {
     const _chunk = chunk.trim();
     try {
@@ -11,102 +26,111 @@ export default class GoogleReader extends BaseReader {
       if (data.candidates) {
         const firstCandidate = data.candidates[0];
         const parts = firstCandidate?.content?.parts || [];
-        let text = "";
-        let reasoning = "";
-        for (const part of parts) {
-          if (part?.text) {
-            if (part.thought) {
-              reasoning += part.text;
-            } else {
-              text += part.text;
-            }
-          }
-        }
-        const functionCallPart = parts.find((part: Record<string, any>) => !!part?.functionCall)?.functionCall;
+        const text = parts
+          .map((part: Record<string, any>) => part?.text || '')
+          .join('');
+        const functionCallPart = parts.find(
+          (part: Record<string, any>) => !!part?.functionCall,
+        )?.functionCall;
 
         return {
           content: text,
-          reasoning,
-          isEnd: !!firstCandidate.finishReason,
-          inputTokens: data.usageMetadata?.promptTokenCount,
-          outputTokens: data.usageMetadata?.candidatesTokenCount,
-          toolCalls: functionCallPart ? [functionCallPart] : [],
+          isEnd: firstCandidate.finishReason,
+          inputTokens: data.usageMetadata.promptTokenCount,
+          outputTokens: data.usageMetadata.candidatesTokenCount,
+          toolCalls: functionCallPart,
         };
       }
       return {
-        content: "",
+        content: '',
         isEnd: false,
         inputTokens: data.usageMetadata?.promptTokenCount,
         outputTokens: data.usageMetadata?.candidatesTokenCount,
       };
     } catch (err) {
-      console.error("Error parsing JSON:", err);
+      console.error('Error parsing JSON:', err);
       return {
-        content: "",
+        content: '',
         isEnd: false,
       };
     }
   }
 
-  protected parseTools(respMsg: IChatResponseMessage): {
-    index: number;
-    id: string;
-    name: string;
-    rawFunctionCall?: Record<string, any>;
-  }[] {
-    if (!respMsg.toolCalls || !Array.isArray(respMsg.toolCalls) || respMsg.toolCalls.length === 0) return [];
-    return respMsg.toolCalls
-      .filter((tc: any) => tc.name)
-      .map((tc: any, i: number) => {
-        const thoughtSignature = tc.thoughtSignature || tc.thought_signature;
-        return {
-          index: i,
-          id: "",
-          name: tc.name,
-          rawFunctionCall: thoughtSignature ? tc : undefined,
-        };
-      });
+  /**
+   * Extracts tool information from Google's functionCall format.
+   * Google uses a single functionCall object instead of an array of tool calls.
+   * Returns null if no functionCall is present in the response.
+   * @param respMsg - The response message containing potential tool calls
+   * @returns Tool object with id, name, and args, or null if no tool call exists
+   */
+  protected parseTools(respMsg: IChatResponseMessage): ITool | null {
+    if (respMsg.toolCalls) {
+      const thoughtSignature =
+        respMsg.toolCalls.thoughtSignature || respMsg.toolCalls.thought_signature;
+
+      return {
+        id: '',
+        name: respMsg.toolCalls.name,
+        args: respMsg.toolCalls.args,
+        ...(thoughtSignature ? { rawFunctionCall: respMsg.toolCalls } : {}),
+      };
+    }
+    return null;
   }
 
+  /**
+   * Extracts tool arguments from Google's functionCall structure.
+   * Returns the arguments with index 0 since Google only supports single tool calls.
+   * @param respMsg - The response message containing tool call arguments
+   * @returns Object with index and args string, or null if no tool calls exist
+   */
   protected parseToolArgs(respMsg: IChatResponseMessage): {
     index: number;
     args: string;
-  }[] {
-    if (!respMsg.toolCalls || !Array.isArray(respMsg.toolCalls) || respMsg.toolCalls.length === 0) return [];
-    return respMsg.toolCalls
-      .filter((tc: any) => tc.args !== undefined && tc.args !== null)
-      .map((tc: any, i: number) => ({
-        index: i,
-        args: typeof tc.args === "string" ? tc.args : JSON.stringify(tc.args),
-      }));
+  } | null {
+    if (respMsg.toolCalls) {
+      return {
+        index: 0,
+        args: respMsg.toolCalls.args,
+      };
+    }
+    return null;
   }
 
+  /**
+   * Reads and processes the Google API stream with buffer accumulation.
+   * Google's streaming format may split JSON objects across chunks, so this method
+   * accumulates data in a buffer and uses extractFirstLevelBrackets to extract
+   * complete JSON objects. Processes each complete object and updates the buffer
+   * to retain only unprocessed data. Handles any remaining buffer data at stream end.
+   * @param callbacks - Object containing error handler, progress callback, and tool calls callback
+   * @returns Promise resolving to the final read result with content, tool, and token counts
+   */
   public async read({
     onError,
     onProgress,
     onToolCalls,
   }: {
     onError: (error: any) => void;
-    onProgress: (chunk: string, reasoning?: string) => void;
-    onToolCalls: (toolName: string | null) => void;
+    onProgress: (chunk: string) => void;
+    onToolCalls: (toolCalls: any) => void;
   }): Promise<IReadResult> {
-    const decoder = new TextDecoder("utf-8");
-    let content = "";
-    let reasoning = "";
+    const decoder = new TextDecoder('utf-8');
+    let content = '';
     let inputTokens = 0;
     let outputTokens = 0;
     let done = false;
-    const toolAccumulators = new Map<
-      number,
-      { id: string; name: string; argsStr: string; rawFunctionCall?: Record<string, any> }
-    >();
-    let buffer = "";
+    let tool = null;
+    let buffer = '';
 
     try {
       while (!done) {
+        /* eslint-disable no-await-in-loop */
         const data = await this.streamReader.read();
+
         done = data.done || false;
         const value = decoder.decode(data.value);
+
         buffer += value;
 
         try {
@@ -114,140 +138,63 @@ export default class GoogleReader extends BaseReader {
           if (items.length > 0) {
             for (const item of items) {
               const response = this.parseReply(item);
-              if (response.content) {
-                content += response.content;
-              }
-              if (response.reasoning) {
-                reasoning += response.reasoning;
-              }
-              if (response.inputTokens !== undefined && response.inputTokens !== null && response.inputTokens > 0) {
+              content += response.content;
+              if (response.inputTokens) {
                 inputTokens = response.inputTokens;
               }
-              if (response.outputTokens !== undefined && response.outputTokens !== null && response.outputTokens > 0) {
-                outputTokens = response.outputTokens;
+              if (response.outputTokens) {
+                outputTokens += response.outputTokens;
               }
-              const toolInfos = this.parseTools(response);
-              for (const info of toolInfos) {
-                const existing = toolAccumulators.get(info.index);
-                if (existing) {
-                  if (info.name) existing.name = info.name;
-                  if (info.rawFunctionCall) existing.rawFunctionCall = info.rawFunctionCall;
-                } else {
-                  toolAccumulators.set(info.index, {
-                    id: info.id || "",
-                    name: info.name || "",
-                    argsStr: "",
-                    rawFunctionCall: info.rawFunctionCall,
-                  });
-                }
-                onToolCalls(info.name);
+              if (response.toolCalls) {
+                tool = this.parseTools(response);
+                onToolCalls(response.toolCalls.name);
               }
-              const toolArgs = this.parseToolArgs(response);
-              for (const arg of toolArgs) {
-                const existing = toolAccumulators.get(arg.index);
-                if (existing) {
-                  existing.argsStr += arg.args;
-                }
-              }
-              onProgress(response.content || "", response.reasoning || "");
+              onProgress(response.content || '');
             }
-            const lastItemEnd = buffer.lastIndexOf("}") + 1;
+
+            const lastItemEnd = buffer.lastIndexOf('}') + 1;
             if (lastItemEnd > 0) {
               buffer = buffer.substring(lastItemEnd);
             }
           }
         } catch (parseErr) {
-          // incomplete JSON, continue
+          debug('JSON parsing incomplete, continuing to collect more data', parseErr);
         }
       }
 
       if (buffer.trim()) {
+        debug('Processing remaining buffer at end of stream');
         try {
           const items = extractFirstLevelBrackets(buffer);
           for (const item of items) {
             const response = this.parseReply(item);
-            if (response.content) {
-              content += response.content;
-            }
-            if (response.reasoning) {
-              reasoning += response.reasoning;
-            }
-            if (response.inputTokens !== undefined && response.inputTokens !== null && response.inputTokens > 0) {
+            content += response.content;
+            if (response.inputTokens) {
               inputTokens = response.inputTokens;
             }
-            if (response.outputTokens !== undefined && response.outputTokens !== null && response.outputTokens > 0) {
-              outputTokens = response.outputTokens;
+            if (response.outputTokens) {
+              outputTokens += response.outputTokens;
             }
-            const toolInfos = this.parseTools(response);
-            for (const info of toolInfos) {
-              const existing = toolAccumulators.get(info.index);
-              if (existing) {
-                if (info.name) existing.name = info.name;
-                if (info.rawFunctionCall) existing.rawFunctionCall = info.rawFunctionCall;
-              } else {
-                toolAccumulators.set(info.index, {
-                  id: info.id || "",
-                  name: info.name || "",
-                  argsStr: "",
-                  rawFunctionCall: info.rawFunctionCall,
-                });
-              }
-              onToolCalls(info.name);
+            if (response.toolCalls) {
+              tool = this.parseTools(response);
+              onToolCalls(response.toolCalls.name);
             }
-            const toolArgs = this.parseToolArgs(response);
-            for (const arg of toolArgs) {
-              const existing = toolAccumulators.get(arg.index);
-              if (existing) {
-                existing.argsStr += arg.args;
-              }
-            }
-            onProgress(response.content || "", response.reasoning || "");
+            onProgress(response.content || '');
           }
         } catch (finalParseErr) {
-          // ignore
+          debug('Failed to parse remaining buffer', finalParseErr);
         }
       }
     } catch (err) {
-      console.error("Read error:", err);
+      console.error('Read error:', err);
       onError(err);
-    }
-
-    const tools = this.finalizeToolsFromMap(toolAccumulators);
-    return {
-      content,
-      reasoning: reasoning || undefined,
-      tools,
-      inputTokens: inputTokens || undefined,
-      outputTokens: outputTokens || undefined,
-    };
-  }
-
-  private finalizeToolsFromMap(
-    toolMap: Map<number, { id: string; name: string; argsStr: string; rawFunctionCall?: Record<string, any> }>,
-  ): ITool[] {
-    if (toolMap.size === 0) return [];
-    const tools: ITool[] = [];
-    const indices = Array.from(toolMap.keys()).sort((a, b) => a - b);
-    for (const idx of indices) {
-      const acc = toolMap.get(idx)!;
-      let parsedArgs: any = {};
-      if (acc.argsStr) {
-        try {
-          parsedArgs = JSON.parse(acc.argsStr);
-        } catch (e) {
-          parsedArgs = acc.argsStr;
-        }
-      }
-      const tool: ITool = {
-        id: acc.id,
-        name: acc.name,
-        args: parsedArgs,
+    } finally {
+      return {
+        content,
+        tool,
+        inputTokens,
+        outputTokens,
       };
-      if (acc.rawFunctionCall) {
-        tool.rawFunctionCall = acc.rawFunctionCall;
-      }
-      tools.push(tool);
     }
-    return tools;
   }
 }

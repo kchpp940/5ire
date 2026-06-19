@@ -1,6 +1,7 @@
 import type { ContentBlock as MCPContentBlock } from "@modelcontextprotocol/sdk/types.js";
 import Debug from "debug";
 import { ContentBlockConverter as MCPContentBlockConverter } from "intellichat/mcp/ContentBlockConverter";
+import { updateMCPConnectionMeta } from "intellichat/services/NextChatService";
 import type { ITool } from "intellichat/readers/IChatReader";
 import OpenAIReader from "intellichat/readers/OpenAIReader";
 import type {
@@ -273,30 +274,7 @@ export default class OpenAIChatService extends NextChatService implements INextC
   }
 
   // eslint-disable-next-line class-methods-use-this
-  protected makeAssistantMessageWithTools(tools: ITool[], content?: string): IChatRequestMessage {
-    const toolCalls = tools.map((tool) => ({
-      id: tool.id,
-      type: "function",
-      function: {
-        arguments: JSON.stringify(tool.args),
-        name: tool.name,
-      },
-    }));
-
-    const result: IChatRequestMessage = {
-      role: "assistant",
-      tool_calls: toolCalls,
-    };
-
-    if (content && content.trim().length > 0) {
-      result.content = content;
-    }
-
-    return result;
-  }
-
-  // eslint-disable-next-line class-methods-use-this
-  protected async makeToolResultMessages(tool: ITool, toolResult: any): Promise<IChatRequestMessage[]> {
+  protected async makeToolMessages(tool: ITool, toolResult: any): Promise<IChatRequestMessage[]> {
     let supplement: IChatRequestMessage | undefined;
 
     const toolMessageContent: IChatRequestMessageContent[] = [];
@@ -359,6 +337,19 @@ export default class OpenAIChatService extends NextChatService implements INextC
 
     const result: IChatRequestMessage[] = [
       {
+        role: "assistant",
+        tool_calls: [
+          {
+            id: tool.id,
+            type: "function",
+            function: {
+              arguments: JSON.stringify(tool.args),
+              name: tool.name,
+            },
+          },
+        ],
+      },
+      {
         role: "tool",
         name: tool.name,
         content: toolMessageContent,
@@ -370,7 +361,7 @@ export default class OpenAIChatService extends NextChatService implements INextC
       result.push(supplement);
     }
 
-    console.log("tool result messages", result);
+    console.log("tool messages", result);
 
     return result;
   }
@@ -386,6 +377,13 @@ export default class OpenAIChatService extends NextChatService implements INextC
     if (this.isToolsEnabled()) {
       const tools = await window.electron.mcp.listTools();
       if (tools) {
+        for (const tool of tools.tools) {
+          if (tool._connectionId) {
+            updateMCPConnectionMeta(tool._connectionId, {
+              approvalPolicy: tool._approvalPolicy,
+            });
+          }
+        }
         const $tools = tools.tools.map((tool: any) => {
           return this.makeTool(tool);
         });

@@ -535,7 +535,7 @@ ${prompt}
           scrollToBottom();
         }
       });
-      chatService.current.onToolCalls((toolName: string | null) => {
+      chatService.current.onToolCalls((toolName: string) => {
         updateStates($chatId, { runningTool: toolName });
       });
       chatService.current.onError(async (err: any, aborted: boolean) => {

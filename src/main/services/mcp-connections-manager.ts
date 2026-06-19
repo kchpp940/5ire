@@ -255,6 +255,7 @@ export class MCPConnectionsManager extends Stateful<MCPConnectionsManager.State>
           projectId: schema.server.projectId,
           config: schema.server.config,
           endpoint: schema.server.endpoint,
+          approvalPolicy: schema.server.approvalPolicy,
         }),
       )
       .from(schema.server)
@@ -278,6 +279,7 @@ export class MCPConnectionsManager extends Stateful<MCPConnectionsManager.State>
               projectId: change.projectId,
               config: change.config,
               endpoint: change.endpoint,
+              approvalPolicy: change.approvalPolicy,
               shortId: this.#serversManager.getShortId(change.id),
             };
 
@@ -352,7 +354,7 @@ export namespace MCPConnectionsManager {
   /**
    * Represents a snapshot of an MCP server.
    */
-  export type ServerSnapshot = Pick<Server, "id" | "transport" | "projectId" | "config" | "endpoint"> & {
+  export type ServerSnapshot = Pick<Server, "id" | "transport" | "projectId" | "config" | "endpoint" | "approvalPolicy"> & {
     shortId: number;
   };
 

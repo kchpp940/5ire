@@ -4,6 +4,7 @@ import {
   type FinalContentBlock,
   ContentBlockConverter as MCPContentBlockConverter,
 } from "intellichat/mcp/ContentBlockConverter";
+import { updateMCPConnectionMeta } from "intellichat/services/NextChatService";
 import AnthropicReader from "intellichat/readers/AnthropicReader";
 import type { ITool } from "intellichat/readers/IChatReader";
 import type {
@@ -139,33 +140,7 @@ export default class AnthropicChatService extends NextChatService implements INe
    * @returns {IChatRequestMessage[]} Array of messages representing the tool use and result
    */
   // eslint-disable-next-line class-methods-use-this
-  protected makeAssistantMessageWithTools(tools: ITool[], content?: string): IChatRequestMessage {
-    const contentBlocks: any[] = [];
-
-    if (content && content.trim().length > 0) {
-      contentBlocks.push({
-        type: "text",
-        text: content,
-      });
-    }
-
-    for (const tool of tools) {
-      contentBlocks.push({
-        type: "tool_use",
-        id: tool.id,
-        name: tool.name,
-        input: tool.args ?? {},
-      });
-    }
-
-    return {
-      role: "assistant",
-      content: contentBlocks,
-    };
-  }
-
-  // eslint-disable-next-line class-methods-use-this
-  protected async makeToolResultMessages(tool: ITool, toolResult: any): Promise<IChatRequestMessage[]> {
+  protected async makeToolMessages(tool: ITool, toolResult: any, content?: string): Promise<IChatRequestMessage[]> {
     /**
      * Note：not supported tool's inputs
      * 1.mimeType
@@ -243,27 +218,30 @@ export default class AnthropicChatService extends NextChatService implements INe
       }
     }
 
-    return [
+    const result = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: tool.id,
+            name: tool.name,
+            input: tool.args ?? {},
+          },
+        ],
+      },
       {
         role: "user",
         content: parts,
       },
     ] as IChatRequestMessage[];
-  }
-
-  protected override async buildToolResultMessages(
-    toolResults: Array<{ tool: ITool; result: any }>,
-  ): Promise<IChatRequestMessage[]> {
-    const allBlocks: any[] = [];
-    for (const { tool, result } of toolResults) {
-      const msgs = await this.makeToolResultMessages(tool, result);
-      for (const msg of msgs) {
-        if (msg.role === "user" && Array.isArray(msg.content)) {
-          allBlocks.push(...(msg.content as any[]));
-        }
-      }
+    if (content && content.trim().length > 0) {
+      (result[0].content as any[]).unshift({
+        type: "text",
+        text: content,
+      });
     }
-    return [{ role: "user", content: allBlocks }] as IChatRequestMessage[];
+    return result;
   }
 
   /**
@@ -480,6 +458,13 @@ export default class AnthropicChatService extends NextChatService implements INe
     if (this.isToolsEnabled()) {
       const tools = await window.electron.mcp.listTools();
       if (tools) {
+        for (const tool of tools.tools) {
+          if (tool._connectionId) {
+            updateMCPConnectionMeta(tool._connectionId, {
+              approvalPolicy: tool._approvalPolicy,
+            });
+          }
+        }
         const unusedTools = tools.tools
           .filter((tool: any) => !this.usedToolNames.includes(tool.name))
           .map((tool: any) => {

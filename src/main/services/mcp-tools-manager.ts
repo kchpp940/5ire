@@ -50,6 +50,17 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
       }
     } catch {}
 
+    try {
+      const match = uri.match(/^tool:([^/]+)\/(.+)$/);
+      if (match) {
+        const connectionId = decodeURIComponent(match[1]);
+        const name = decodeURIComponent(match[2]);
+        if (connectionId && name) {
+          return { connectionId, name };
+        }
+      }
+    } catch {}
+
     logger.warning("Invalid tool URI", uri);
 
     return null;
@@ -104,7 +115,7 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
               return {
                 ...tool,
                 ...{
-                  uri: this.#formatToolURI(connection.serverSnapshot.shortId.toString(16), tool),
+                  uri: this.#formatToolURI(id, tool),
                 },
               };
             }),
@@ -288,13 +299,7 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
 
     this.#legacyCallAbortControllers.set(controllerId, controller);
 
-    let connection: MCPConnectionsManager.Connection | undefined;
-
-    for (const conn of this.#connectionsManager.state.connections.values()) {
-      if (`t_${conn.serverSnapshot.shortId.toString(16).padStart(2, "0")}` === options.client) {
-        connection = conn;
-      }
-    }
+    const connection = this.#connectionsManager.state.connections.get(options.client);
 
     if (!connection || connection.status !== "connected") {
       return {
@@ -353,7 +358,9 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
             return {
               ...tool,
               ...{
-                name: `t_${collection.server.shortId.toString(16).padStart(2, "0")}--${tool.name}`,
+                name: `${id}--${tool.name}`,
+                _connectionId: id,
+                _approvalPolicy: collection.server.approvalPolicy,
               },
             };
           }),
