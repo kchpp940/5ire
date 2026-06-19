@@ -12,6 +12,7 @@ import {
 } from "@/main/constants";
 import { Database } from "@/main/database";
 import { Container } from "@/main/internal/container";
+import { DocumentEmbedder } from "@/main/services/document-embedder";
 import { Embedder } from "@/main/services/embedder";
 import { LegacyDataMigrator } from "@/main/services/legacy-data-migrator";
 import { Logger } from "@/main/services/logger";
@@ -24,6 +25,7 @@ export class DocumentManager {
   #database = Container.inject(Database);
   #logger = Container.inject(Logger).scope("DocumentsManager");
   #embedder = Container.inject(Embedder);
+  #documentEmbedder = Container.inject(DocumentEmbedder);
   #legacyDataMigrator = Container.inject(LegacyDataMigrator);
 
   /**
@@ -82,6 +84,19 @@ export class DocumentManager {
   async deleteCollection(options: DocumentManager.DeleteCollectionOptions) {
     const client = this.#database.client;
     const schema = this.#database.schema;
+    const logger = this.#logger.scope("DeleteCollection");
+
+    const docs = await client
+      .select({ id: schema.document.id })
+      .from(schema.document)
+      .where(eq(schema.document.collectionId, options.id))
+      .execute();
+
+    for (const doc of docs) {
+      await this.#documentEmbedder.cancelDocumentProcessing(doc.id).catch((error) => {
+        logger.error(`Failed to cancel processing for document ${doc.id}:`, error);
+      });
+    }
 
     return client.transaction(async (tx) => {
       const exists = await tx
@@ -253,6 +268,11 @@ export class DocumentManager {
   async deleteDocument(options: DocumentManager.DeleteDocumentOptions) {
     const client = this.#database.client;
     const schema = this.#database.schema;
+    const logger = this.#logger.scope("DeleteDocument");
+
+    await this.#documentEmbedder.cancelDocumentProcessing(options.id).catch((error) => {
+      logger.error(`Failed to cancel processing for document ${options.id}:`, error);
+    });
 
     return client.transaction(async (tx) => {
       const exists = await tx.$count(schema.document, eq(schema.document.id, options.id)).then((count) => count > 0);

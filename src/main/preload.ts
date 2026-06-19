@@ -84,6 +84,7 @@ const BRIDGE = {
   documentEmbedder: connector.connect<DocumentEmbedderBridge>("document-embedder", {
     createStateStream: "stream",
     createEventStream: "stream",
+    cancelDocumentProcessing: "async",
   }),
   promptManager: connector.connect<PromptManagerBridge>("prompt-manager", {
     createPrompt: "async",

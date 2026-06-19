@@ -26,5 +26,6 @@ export class DocumentEmbedderBridge extends Bridge.define("document-embedder", (
     createEventStream() {
       return service.emitter.createStream();
     },
+    cancelDocumentProcessing: service.cancelDocumentProcessing.bind(service),
   };
 }) {}

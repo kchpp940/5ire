@@ -1,8 +1,9 @@
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { asError } from "catch-unknown";
-import { asc, eq, not } from "drizzle-orm";
+import { asc, eq, inArray, not } from "drizzle-orm";
 import { createReadStream, createWriteStream } from "fs-extra";
 import { Database } from "@/main/database";
 import { Container } from "@/main/internal/container";
@@ -13,11 +14,6 @@ import { DocumentExtractor } from "@/main/services/document-extractor";
 import { Embedder } from "@/main/services/embedder";
 import { Logger } from "@/main/services/logger";
 
-/**
- * DocumentEmbedder class is used to handle document embedding vector generation
- * Responsible for fetching pending documents from the database, extracting text content and generating embedding vectors
- * @extends Stateful<DocumentEmbedder.State>
- */
 export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
   #database = Container.inject(Database);
   #embedder = Container.inject(Embedder);
@@ -25,36 +21,14 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
   #logger = Container.inject(Logger).scope("DocumentEmbedder");
   #emitter = Emitter.create<DocumentEmbedder.Events>();
 
-  /**
-   * Number of worker threads
-   * Controls the number of concurrent document processing to avoid exhausting system resources
-   */
   #workers = 1;
-
-  /**
-   * Empty state flag
-   * Set to true when there are no pending documents to avoid unnecessary polling
-   */
   #empty = false;
-
-  /**
-   * Mutex instance
-   * Used to ensure thread safety for database operations with multiple concurrent requests
-   */
   #mutex = Mutex.create();
 
-  /**
-   * Get the event emitter instance
-   * @returns Event emitter instance
-   */
   get emitter() {
     return this.#emitter;
   }
 
-  /**
-   * Create DocumentEmbedder instance
-   * Initialize the state of documents being processed
-   */
   constructor() {
     super(() => {
       return {
@@ -63,11 +37,6 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
     });
   }
 
-  /**
-   * Lock and fetch a pending document
-   * Use mutex to ensure concurrency safety and update document status to processing
-   * @returns Promise<{id: string, url: string} | undefined> Document information or undefined
-   */
   async #lock() {
     const client = this.#database.client;
     const schema = this.#database.schema;
@@ -113,21 +82,62 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
       });
   }
 
-  /**
-   * Process embedding vector generation for the specified document
-   * Includes three stages: document extraction, vector embedding, and result persistence
-   *
-   * Processing flow:
-   * 1. Extraction stage: Use DocumentExtractor to extract document text content from URL
-   * 2. Embedding stage: Use Embedder to generate vector representations for each text block
-   * 3. Saving stage: Save the generated vectors and corresponding text to the database
-   *
-   * Progress status is updated in real-time during processing, and events are triggered when errors occur
-   *
-   * @param id Document ID
-   * @param url Document URL
-   * @returns Promise<void>
-   */
+  async #cleanupTempFile(file?: string) {
+    if (!file) {
+      return;
+    }
+
+    const logger = this.#logger.scope("CleanupTempFile");
+
+    await rm(file, { force: true }).catch((error) => {
+      logger.error(`Failed to remove temp file ${file}:`, error);
+    });
+  }
+
+  async #cancelProcessingInternal(id: string, reason: "deleted" | "cancelled" | "model-unavailable") {
+    const logger = this.#logger.scope("CancelProcessing");
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+
+    let controller: AbortController | undefined;
+    let tempFile: string | undefined;
+
+    this.update((draft) => {
+      const it = draft.processingDocuments[id];
+      if (it) {
+        controller = it.controller;
+        tempFile = it.tempFile;
+        delete draft.processingDocuments[id];
+      }
+    });
+
+    if (controller) {
+      controller.abort();
+    }
+
+    await this.#cleanupTempFile(tempFile);
+
+    if (reason === "deleted") {
+      return;
+    }
+
+    await client
+      .update(schema.document)
+      .set({
+        status: reason === "model-unavailable" ? "pending" : "failed",
+        error: reason === "model-unavailable" ? null : reason === "cancelled" ? "Processing cancelled" : null,
+      })
+      .where(eq(schema.document.id, id))
+      .execute()
+      .catch((error) => {
+        logger.error(`Failed to update document ${id} status after cancel (${reason}):`, error);
+      });
+  }
+
+  async cancelDocumentProcessing(id: string) {
+    return this.#cancelProcessingInternal(id, "cancelled");
+  }
+
   async #process(id: string, url: string) {
     const logger = this.#logger.scope("Process");
     const controller = new AbortController();
@@ -135,193 +145,182 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
     const client = this.#database.client;
     const schema = this.#database.schema;
 
+    let tempFile: string | undefined;
+
     this.update((draft) => {
       draft.processingDocuments[id] = {
         controller: controller,
         status: "extracting",
         progress: 0,
+        tempFile: undefined,
       };
     });
 
     logger.info(`Processing document "${url}"`);
 
-    return (
-      this.#extractor
-        .extract(url)
-        // Embedding
-        .then(async ({ texts, mimetype, size }) => {
-          controller.signal.throwIfAborted();
+    const cleanup = async () => {
+      await this.#cleanupTempFile(tempFile);
+      this.update((draft) => {
+        delete draft.processingDocuments[id];
+      });
+    };
 
-          logger.info(`Extracted ${texts.length} text blocks in document "${url}"`);
+    try {
+      const { texts, mimetype, size } = await this.#extractor.extract(url, controller.signal);
 
-          this.update((draft) => {
-            draft.processingDocuments[id] = {
-              controller: controller,
-              status: "embedding",
-              progress: 0,
-            };
-          });
+      controller.signal.throwIfAborted();
+      logger.info(`Extracted ${texts.length} text blocks in document "${url}"`);
 
-          const file = join(tmpdir(), crypto.randomUUID());
-          const stream = createWriteStream(file);
+      this.update((draft) => {
+        if (draft.processingDocuments[id]) {
+          draft.processingDocuments[id].status = "embedding";
+          draft.processingDocuments[id].progress = 0;
+        }
+      });
 
-          let processed = 0;
+      tempFile = join(tmpdir(), crypto.randomUUID());
+      const stream = createWriteStream(tempFile);
 
-          for (const text of texts) {
-            controller.signal.throwIfAborted();
+      this.update((draft) => {
+        if (draft.processingDocuments[id]) {
+          draft.processingDocuments[id].tempFile = tempFile;
+        }
+      });
 
-            await this.#embedder.embed([text]).then(([vector]) => {
-              stream.write(`${JSON.stringify({ text, vector })}\n`);
-            });
+      let processed = 0;
 
-            processed += 1;
+      for (const text of texts) {
+        controller.signal.throwIfAborted();
 
-            this.update((draft) => {
-              draft.processingDocuments[id] = {
-                controller: controller,
-                status: "embedding",
-                progress: processed / texts.length,
-              };
-            });
+        await this.#embedder.embed([text]).then(([vector]) => {
+          stream.write(`${JSON.stringify({ text, vector })}\n`);
+        });
 
-            await new Promise((resolve) => setTimeout(resolve, 10));
+        processed += 1;
+
+        this.update((draft) => {
+          if (draft.processingDocuments[id]) {
+            draft.processingDocuments[id].progress = processed / texts.length;
           }
+        });
 
-          stream.end();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
 
-          await new Promise<void>((resolve, reject) => {
-            stream.on("finish", resolve);
-            stream.on("error", reject);
-          });
+      stream.end();
 
+      await new Promise<void>((resolve, reject) => {
+        stream.on("finish", resolve);
+        stream.on("error", reject);
+      });
+
+      controller.signal.throwIfAborted();
+
+      const result = {
+        readline: createInterface({ input: createReadStream(tempFile), crlfDelay: Infinity }),
+        length: texts.length,
+        mimetype,
+        size,
+        file: tempFile,
+      };
+
+      controller.signal.throwIfAborted();
+
+      this.update((draft) => {
+        if (draft.processingDocuments[id]) {
+          draft.processingDocuments[id].status = "saving";
+          draft.processingDocuments[id].progress = 0;
+        }
+      });
+
+      let inserted = 0;
+
+      const batch: { text: string; vector: number[] }[] = [];
+      const insert = async () => {
+        const values = batch.map(({ text, vector }, index) => {
           return {
-            readline: createInterface({ input: createReadStream(file), crlfDelay: Infinity }),
-            length: texts.length,
-            mimetype,
-            size,
-          };
-        })
-        // Persistence
-        .then(async (result) => {
-          controller.signal.throwIfAborted();
+            documentId: id,
+            text,
+            embedding: vector,
+            index: inserted + index,
+          } as const;
+        });
 
-          this.update((draft) => {
-            draft.processingDocuments[id] = {
-              controller: controller,
-              status: "saving",
-              progress: 0,
-            };
-          });
+        if (values.length === 0) {
+          return;
+        }
 
-          let inserted = 0;
-
-          const batch: { text: string; vector: number[] }[] = [];
-          const insert = async () => {
-            const values = batch.map(({ text, vector }, index) => {
-              return {
-                documentId: id,
-                text,
-                embedding: vector,
-                index: inserted + index,
-              } as const;
-            });
-
-            if (values.length === 0) {
-              return;
-            }
-
-            return client
-              .insert(schema.documentChunk)
-              .values(values)
-              .execute()
-              .then(() => {
-                inserted += values.length;
-                // Clear the batch after inserting
-                batch.length = 0;
-                // Update the progress
-                this.update((draft) => {
-                  draft.processingDocuments[id] = {
-                    controller: controller,
-                    status: "saving",
-                    progress: inserted / result.length,
-                  };
-                });
-              });
-          };
-
-          try {
-            for await (const line of result.readline) {
-              controller.signal.throwIfAborted();
-              batch.push(JSON.parse(line));
-
-              if (batch.length >= 10) {
-                await insert();
+        return client
+          .insert(schema.documentChunk)
+          .values(values)
+          .execute()
+          .then(() => {
+            inserted += values.length;
+            batch.length = 0;
+            this.update((draft) => {
+              if (draft.processingDocuments[id]) {
+                draft.processingDocuments[id].progress = inserted / result.length;
               }
-
-              await new Promise((resolve) => setTimeout(resolve, 20));
-            }
-
-            await insert();
-          } finally {
-            result.readline.close();
-          }
-
-          await client
-            .update(schema.document)
-            .set({
-              status: "completed",
-              mimetype: result.mimetype,
-              size: result.size,
-            })
-            .where(eq(schema.document.id, id))
-            .execute();
-        })
-        // Error handling
-        .catch(async (error) => {
-          if (controller.signal.aborted) {
-            return;
-          }
-
-          logger.error("Failed to process document:", error);
-
-          this.#emitter.emit("document-embed-failed", {
-            id,
-            url,
-            message: asError(error).message,
-          });
-
-          return client
-            .update(schema.document)
-            .set({
-              status: "failed",
-              error: asError(error).message,
-            })
-            .where(eq(schema.document.id, id))
-            .execute()
-            .catch(() => {
-              logger.error("Failed to update document status after processing failure:", error);
             });
-        })
-        // Reset processing state
-        .finally(() => {
-          this.update((draft) => {
-            delete draft.processingDocuments[id];
           });
+      };
+
+      try {
+        for await (const line of result.readline) {
+          controller.signal.throwIfAborted();
+          batch.push(JSON.parse(line));
+
+          if (batch.length >= 10) {
+            await insert();
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+
+        await insert();
+      } finally {
+        result.readline.close();
+      }
+
+      await client
+        .update(schema.document)
+        .set({
+          status: "completed",
+          mimetype: result.mimetype,
+          size: result.size,
         })
-    );
+        .where(eq(schema.document.id, id))
+        .execute();
+    } catch (error) {
+      if (controller.signal.aborted) {
+        logger.info(`Document processing aborted: ${url}`);
+        return;
+      }
+
+      logger.error("Failed to process document:", error);
+
+      this.#emitter.emit("document-embed-failed", {
+        id,
+        url,
+        message: asError(error).message,
+      });
+
+      await client
+        .update(schema.document)
+        .set({
+          status: "failed",
+          error: asError(error).message,
+        })
+        .where(eq(schema.document.id, id))
+        .execute()
+        .catch((e) => {
+          logger.error("Failed to update document status after processing failure:", e);
+        });
+    } finally {
+      await cleanup();
+    }
   }
 
-  /**
-   * Pull and process pending documents
-   * Concurrently process documents based on the number of available worker threads
-   *
-   * Workflow:
-   * 1. Check if the embedder is ready
-   * 2. Check if there are pending documents
-   * 3. Check if there are available worker threads
-   * 4. Loop to process documents using worker threads
-   * 5. Release worker threads after processing and recursively call to continue processing
-   */
   #pull() {
     if (this.#embedder.state.status.type !== "ready") {
       return;
@@ -353,11 +352,6 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
     }
   }
 
-  /**
-   * Initialize the document embedder
-   * Set up database listeners and embedder status change listeners
-   * @returns Promise<void>
-   */
   async init() {
     await this.#database.ready;
 
@@ -396,12 +390,8 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
           this.#empty = false;
           this.#pull();
         } else if (change.__op__ === "DELETE") {
-          this.update((draft) => {
-            const it = draft.processingDocuments[change.id];
-            if (it) {
-              it.controller.abort();
-              delete draft.processingDocuments[change.id];
-            }
+          this.#cancelProcessingInternal(change.id, "deleted").catch((error) => {
+            this.#logger.scope("LiveChanges").error(`Failed to cancel processing for deleted document ${change.id}:`, error);
           });
         }
       }
@@ -409,15 +399,15 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
 
     this.#embedder.subscribe((prev, next) => {
       if (prev.status.type === "ready" && next.status.type !== "ready") {
-        this.update((draft) => {
-          for (const [_, it] of Object.entries(draft.processingDocuments)) {
-            it.controller.abort();
-          }
-
-          draft.processingDocuments = {};
-        });
+        const ids = Object.keys(this.state.processingDocuments);
+        for (const id of ids) {
+          this.#cancelProcessingInternal(id, "model-unavailable").catch((error) => {
+            this.#logger.scope("EmbedderStatus").error(`Failed to cancel processing for document ${id} on model unavailable:`, error);
+          });
+        }
       }
       if (prev.status.type !== "ready" && next.status.type === "ready") {
+        this.#empty = false;
         this.#pull();
       }
     });
@@ -429,60 +419,22 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
 }
 
 export namespace DocumentEmbedder {
-  /**
-   * Document embedder event definitions
-   * Defines events that may be triggered during document embedding
-   */
   export type Events = {
-    /**
-     * Document embedding failed event
-     * Triggered when an error occurs during document embedding
-     */
     "document-embed-failed": {
-      /**
-       * Document ID
-       */
       id: string;
-      /**
-       * Document URL
-       */
       url: string;
-      /**
-       * Error message
-       */
       message: string;
     };
   };
 
-  /**
-   * Document embedder state definition
-   * Contains information about documents being processed
-   */
   export type State = {
-    /**
-     * Records of documents being processed
-     * Keyed by document ID, storing processing controller, status and progress information
-     */
     processingDocuments: Record<
       string,
       {
-        /**
-         * Abort controller
-         * Used to cancel ongoing document processing operations
-         */
         controller: AbortController;
-        /**
-         * Processing status
-         * - extracting: Extracting document content
-         * - embedding: Generating embedding vectors
-         * - saving: Saving results
-         */
         status: "embedding" | "extracting" | "saving";
-        /**
-         * Processing progress
-         * A value between 0 and 1, representing the percentage of completion
-         */
         progress: number;
+        tempFile?: string;
       }
     >;
   };
