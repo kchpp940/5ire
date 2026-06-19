@@ -1,11 +1,13 @@
+import { useMemo } from "react";
 import { useStreamStore } from "@/renderer/next/hooks/remote/utils";
 
-const key = crypto.randomUUID();
+const moduleKey = crypto.randomUUID();
 
 export const useLiveDocuments = (collectionId: string) => {
+  const cacheKey = useMemo(() => [moduleKey, collectionId], [collectionId]);
   return useStreamStore({
     streamLoader: () => window.bridge.documentManager.liveDocuments(collectionId),
-    key: [key, collectionId],
+    key: cacheKey,
     shared: false,
   });
 };

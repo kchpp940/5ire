@@ -171,16 +171,18 @@ export type UseStreamStoreOptions<T> = {
   key: readonly unknown[];
   autoRegister?: boolean;
   shared?: boolean;
+  onDone?: () => void;
 };
 
 export const useStreamStore = <T>(options: UseStreamStoreOptions<T>) => {
-  const { streamLoader, key, autoRegister, shared = false } = options;
+  const { streamLoader, key, autoRegister, shared = false, onDone } = options;
   const store = suspend(async () => {
     return createStateStreamStore({
       streamLoader,
       autoRegister,
       onDone: () => {
         clear(key);
+        onDone?.();
       },
     }).then(({ instance }) => instance);
   }, key) as StreamStore<T>;
@@ -190,26 +192,27 @@ export const useStreamStore = <T>(options: UseStreamStoreOptions<T>) => {
       retainStore(key);
     }
     return () => {
+      clear(key);
       if (shared) {
         const remaining = releaseStore(key);
         if (remaining > 0) return;
       }
       store.destroy?.().catch(() => {});
-      clear(key);
     };
-  }, [store, ...key, shared, key]);
+  }, [store, shared, key]);
 
   return useStore(store);
 };
 
 export const useStreamStoreWithSelector = <T, S>(options: UseStreamStoreOptions<T>, selector: (state: T) => S) => {
-  const { streamLoader, key, autoRegister, shared = false } = options;
+  const { streamLoader, key, autoRegister, shared = false, onDone } = options;
   const store = suspend(async () => {
     return createStateStreamStore({
       streamLoader,
       autoRegister,
       onDone: () => {
         clear(key);
+        onDone?.();
       },
     }).then(({ instance }) => instance);
   }, key) as StreamStore<T>;
@@ -219,26 +222,27 @@ export const useStreamStoreWithSelector = <T, S>(options: UseStreamStoreOptions<
       retainStore(key);
     }
     return () => {
+      clear(key);
       if (shared) {
         const remaining = releaseStore(key);
         if (remaining > 0) return;
       }
       store.destroy?.().catch(() => {});
-      clear(key);
     };
-  }, [store, ...key, shared, key]);
+  }, [store, shared, key]);
 
   return useStore(store, selector);
 };
 
 export const useStreamStoreRef = <T>(options: UseStreamStoreOptions<T>) => {
-  const { streamLoader, key, autoRegister, shared = false } = options;
+  const { streamLoader, key, autoRegister, shared = false, onDone } = options;
   const store = suspend(async () => {
     return createStateStreamStore({
       streamLoader,
       autoRegister,
       onDone: () => {
         clear(key);
+        onDone?.();
       },
     }).then(({ instance }) => instance);
   }, key) as StreamStore<T>;
@@ -252,12 +256,12 @@ export const useStreamStoreRef = <T>(options: UseStreamStoreOptions<T>) => {
     }
     const currentStore = ref.current;
     return () => {
+      clear(key);
       if (shared) {
         const remaining = releaseStore(key);
         if (remaining > 0) return;
       }
       currentStore.destroy?.().catch(() => {});
-      clear(key);
     };
   }, [shared, key]);
 

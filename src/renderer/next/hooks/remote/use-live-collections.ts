@@ -1,21 +1,24 @@
-import { preload } from "suspend-react";
+import { clear, preload } from "suspend-react";
 import { useStreamStore } from "@/renderer/next/hooks/remote/utils";
 
 const key = crypto.randomUUID();
+const cacheKey = [key];
 const streamLoader = window.bridge.documentManager.liveCollections;
 
 preload(async () => {
   const { createStateStreamStore } = await import("@/renderer/next/hooks/remote/utils");
   return createStateStreamStore({
     streamLoader,
-    onDone: () => {},
+    onDone: () => {
+      clear(cacheKey);
+    },
   }).then(({ instance }) => instance);
-}, [key]);
+}, cacheKey);
 
 export const useLiveCollections = () => {
   return useStreamStore({
     streamLoader,
-    key: [key],
+    key: cacheKey,
     shared: true,
   });
 };
