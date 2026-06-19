@@ -19,27 +19,6 @@ import { raiseError, stripHtmlTags } from 'utils/util';
 
 const debug = Debug('5ire:intellichat:NextChatService');
 
-type MCPToolNameMeta = {
-  connectionId: string;
-  toolName: string;
-  approvalPolicy?: string;
-  type?: string;
-};
-
-const mcpToolNameMap = new Map<string, MCPToolNameMeta>();
-
-export function registerMCPToolName(safeName: string, meta: MCPToolNameMeta) {
-  mcpToolNameMap.set(safeName, meta);
-}
-
-export function resolveMCPToolName(safeName: string): MCPToolNameMeta | undefined {
-  return mcpToolNameMap.get(safeName);
-}
-
-export function clearMCPToolNameMap() {
-  mcpToolNameMap.clear();
-}
-
 export default abstract class NextCharService {
   protected updateBuffer: string = '';
 
@@ -80,6 +59,26 @@ export default abstract class NextCharService {
   protected outputTokens: number = 0;
 
   protected traceTool: (chatId: string, label: string, msg: string) => void;
+
+  protected mcpToolNameMap = new Map<string, {
+    connectionId: string;
+    toolName: string;
+    approvalPolicy?: string;
+    type?: string;
+  }>();
+
+  protected registerMCPToolName(safeName: string, meta: {
+    connectionId: string;
+    toolName: string;
+    approvalPolicy?: string;
+    type?: string;
+  }) {
+    this.mcpToolNameMap.set(safeName, meta);
+  }
+
+  protected resolveMCPToolName(safeName: string) {
+    return this.mcpToolNameMap.get(safeName);
+  }
 
   protected getSystemRoleName() {
     if (this.name === OpenAI.name) {
@@ -369,7 +368,7 @@ export default abstract class NextCharService {
         this.outputTokens += readResult.outputTokens;
       }
       if (readResult.tool) {
-        const toolMeta = resolveMCPToolName(readResult.tool.name);
+        const toolMeta = this.resolveMCPToolName(readResult.tool.name);
 
         if (!toolMeta) {
           const errorResult = {

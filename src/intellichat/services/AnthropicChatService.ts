@@ -4,7 +4,6 @@ import {
   type FinalContentBlock,
   ContentBlockConverter as MCPContentBlockConverter,
 } from "intellichat/mcp/ContentBlockConverter";
-import { registerMCPToolName, resolveMCPToolName } from "intellichat/services/NextChatService";
 import AnthropicReader from "intellichat/readers/AnthropicReader";
 import type { ITool } from "intellichat/readers/IChatReader";
 import type {
@@ -182,7 +181,7 @@ export default class AnthropicChatService extends NextChatService implements INe
           convertedBlocks.push(
             await MCPContentBlockConverter.convert(block, (uri) => {
               return window.electron.mcp.readResource(
-                resolveMCPToolName(tool.name)?.connectionId || "",
+                this.resolveMCPToolName(tool.name)?.connectionId || "",
                 uri,
               ).then((result) => {
                 if (result.isError) {
@@ -463,7 +462,7 @@ export default class AnthropicChatService extends NextChatService implements INe
       if (tools) {
         for (const tool of tools.tools) {
           if (tool._connectionId) {
-            registerMCPToolName(tool.name, {
+            this.registerMCPToolName(tool.name, {
               connectionId: tool._connectionId,
               toolName: tool._toolName,
               approvalPolicy: tool._approvalPolicy,

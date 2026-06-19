@@ -293,13 +293,32 @@ export class MCPToolsManager extends Stateful<MCPToolsManager.State> {
 
   #legacyCallAbortControllers = new Map<string, AbortController>();
 
+  #resolveClientToConnectionId(client: string): string | undefined {
+    if (this.#connectionsManager.state.connections.has(client)) {
+      return client;
+    }
+
+    const shortIdMatch = client.match(/^t_([0-9a-f]+)$/i);
+    if (shortIdMatch) {
+      const shortId = parseInt(shortIdMatch[1], 16);
+      if (!Number.isNaN(shortId)) {
+        return this.#connectionsManager.getConnectionIdByShortId(shortId);
+      }
+    }
+
+    return undefined;
+  }
+
   async legacyCall(options: MCPToolsManager.LegacyCallOptions) {
     const controllerId = options.requestId || crypto.randomUUID();
     const controller = new AbortController();
 
     this.#legacyCallAbortControllers.set(controllerId, controller);
 
-    const connection = this.#connectionsManager.state.connections.get(options.client);
+    const connectionId = this.#resolveClientToConnectionId(options.client);
+    const connection = connectionId
+      ? this.#connectionsManager.state.connections.get(connectionId)
+      : undefined;
 
     if (!connection || connection.status !== "connected") {
       return {
