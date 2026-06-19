@@ -312,6 +312,90 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
   }
 
   /**
+   * Suspend document embedding processing
+   * - Abort all documents being processed
+   * - Reset processing documents to pending status in database
+   * - Clear processing document records
+   *
+   * Called when embedder becomes unavailable (model removed, download cancelled, download failed, etc.)
+   * Ensures documents are not stuck in "processing" state and can be retried when embedder recovers
+   */
+  #suspend() {
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+    const logger = this.#logger.scope("Suspend");
+
+    const ids = Object.keys(this.state.processingDocuments);
+
+    if (ids.length === 0) {
+      return;
+    }
+
+    this.update((draft) => {
+      for (const [_, it] of Object.entries(draft.processingDocuments)) {
+        it.controller.abort();
+      }
+
+      draft.processingDocuments = {};
+    });
+
+    client
+      .update(schema.document)
+      .set({
+        status: "pending",
+      })
+      .where(inArray(schema.document.id, ids))
+      .execute()
+      .catch((error) => {
+        logger.error("Failed to reset processing documents to pending:", error);
+      });
+  }
+
+  /**
+   * Resume document embedding processing
+   * - Reset empty flag
+   * - Start pulling pending documents for processing
+   *
+   * Called when embedder becomes ready (initialization complete, re-download successful, etc.)
+   * Ensures pending documents are automatically picked up for processing
+   */
+  #resume() {
+    this.#empty = false;
+    this.#pull();
+  }
+
+  /**
+   * Retry failed documents
+   * - Reset all failed documents to pending status
+   * - Then resume processing
+   *
+   * Can be called externally to trigger retry of all failed documents
+   */
+  async retryFailed() {
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+    const logger = this.#logger.scope("RetryFailed");
+
+    if (this.#embedder.state.status.type !== "ready") {
+      logger.warning("Cannot retry failed documents: embedder is not ready");
+      return;
+    }
+
+    await client
+      .update(schema.document)
+      .set({
+        status: "pending",
+      })
+      .where(eq(schema.document.status, "failed"))
+      .execute()
+      .catch((error) => {
+        logger.error("Failed to reset failed documents to pending:", error);
+      });
+
+    this.#resume();
+  }
+
+  /**
    * Pull and process pending documents
    * Concurrently process documents based on the number of available worker threads
    *
@@ -409,37 +493,15 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
 
     this.#embedder.subscribe((prev, next) => {
       if (prev.status.type === "ready" && next.status.type !== "ready") {
-        const ids = Object.keys(this.state.processingDocuments);
-
-        this.update((draft) => {
-          for (const [_, it] of Object.entries(draft.processingDocuments)) {
-            it.controller.abort();
-          }
-
-          draft.processingDocuments = {};
-        });
-
-        if (ids.length > 0) {
-          client
-            .update(schema.document)
-            .set({
-              status: "pending",
-            })
-            .where(inArray(schema.document.id, ids))
-            .execute()
-            .catch((error) => {
-              this.#logger.error("Failed to reset processing documents to pending:", error);
-            });
-        }
+        this.#suspend();
       }
       if (prev.status.type !== "ready" && next.status.type === "ready") {
-        this.#empty = false;
-        this.#pull();
+        this.#resume();
       }
     });
 
     if (this.#embedder.state.status.type === "ready") {
-      this.#pull();
+      this.#resume();
     }
   }
 }
