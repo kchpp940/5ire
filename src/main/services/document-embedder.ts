@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { asError } from "catch-unknown";
-import { and, asc, eq, inArray, not } from "drizzle-orm";
+import { asc, eq, not } from "drizzle-orm";
 import { createReadStream, createWriteStream } from "fs-extra";
 import { Database } from "@/main/database";
 import { Container } from "@/main/internal/container";
@@ -312,133 +312,6 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
   }
 
   /**
-   * Suspend document embedding processing
-   * - Abort all documents being processed
-   * - Reset processing documents to pending status in database
-   * - Clear processing document records
-   *
-   * Called when embedder becomes unavailable (model removed, download cancelled, download failed, etc.)
-   * Ensures documents are not stuck in "processing" state and can be retried when embedder recovers
-   */
-  #suspend() {
-    const client = this.#database.client;
-    const schema = this.#database.schema;
-    const logger = this.#logger.scope("Suspend");
-
-    const ids = Object.keys(this.state.processingDocuments);
-
-    if (ids.length === 0) {
-      return;
-    }
-
-    this.update((draft) => {
-      for (const [_, it] of Object.entries(draft.processingDocuments)) {
-        it.controller.abort();
-      }
-
-      draft.processingDocuments = {};
-    });
-
-    client
-      .update(schema.document)
-      .set({
-        status: "pending",
-      })
-      .where(inArray(schema.document.id, ids))
-      .execute()
-      .catch((error) => {
-        logger.error("Failed to reset processing documents to pending:", error);
-      });
-  }
-
-  /**
-   * Resume document embedding processing
-   * - Reset empty flag
-   * - Start pulling pending documents for processing
-   *
-   * Called when embedder becomes ready (initialization complete, re-download successful, etc.)
-   * Ensures pending documents are automatically picked up for processing
-   */
-  #resume() {
-    this.#empty = false;
-    this.#pull();
-  }
-
-  /**
-   * Retry a single failed document
-   * - Reset the specified failed document to pending status
-   * - Then resume processing
-   *
-   * Called by UI when user clicks "retry" on a specific failed document
-   *
-   * @param id Document ID to retry
-   */
-  async retryDocument(id: string) {
-    const client = this.#database.client;
-    const schema = this.#database.schema;
-    const logger = this.#logger.scope("RetryDocument");
-
-    if (this.#embedder.state.status.type !== "ready") {
-      logger.warning("Cannot retry document: embedder is not ready");
-      return;
-    }
-
-    await client
-      .update(schema.document)
-      .set({
-        status: "pending",
-        error: null,
-      })
-      .where(and(eq(schema.document.id, id), eq(schema.document.status, "failed")))
-      .execute()
-      .catch((error) => {
-        logger.error("Failed to reset failed document to pending:", error);
-      });
-
-    this.#resume();
-  }
-
-  /**
-   * Retry failed documents
-   * - Reset failed documents to pending status
-   * - If collectionId is provided, only retry failed documents in that collection
-   * - If collectionId is not provided, retry all failed documents
-   * - Then resume processing
-   *
-   * Can be called externally to trigger retry of failed documents
-   *
-   * @param collectionId Optional collection ID to scope the retry operation
-   */
-  async retryFailed(collectionId?: string) {
-    const client = this.#database.client;
-    const schema = this.#database.schema;
-    const logger = this.#logger.scope("RetryFailed");
-
-    if (this.#embedder.state.status.type !== "ready") {
-      logger.warning("Cannot retry failed documents: embedder is not ready");
-      return;
-    }
-
-    const whereClause = collectionId
-      ? and(eq(schema.document.status, "failed"), eq(schema.document.collectionId, collectionId))
-      : eq(schema.document.status, "failed");
-
-    await client
-      .update(schema.document)
-      .set({
-        status: "pending",
-        error: null,
-      })
-      .where(whereClause)
-      .execute()
-      .catch((error) => {
-        logger.error("Failed to reset failed documents to pending:", error);
-      });
-
-    this.#resume();
-  }
-
-  /**
    * Pull and process pending documents
    * Concurrently process documents based on the number of available worker threads
    *
@@ -536,15 +409,21 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
 
     this.#embedder.subscribe((prev, next) => {
       if (prev.status.type === "ready" && next.status.type !== "ready") {
-        this.#suspend();
+        this.update((draft) => {
+          for (const [_, it] of Object.entries(draft.processingDocuments)) {
+            it.controller.abort();
+          }
+
+          draft.processingDocuments = {};
+        });
       }
       if (prev.status.type !== "ready" && next.status.type === "ready") {
-        this.#resume();
+        this.#pull();
       }
     });
 
     if (this.#embedder.state.status.type === "ready") {
-      this.#resume();
+      this.#pull();
     }
   }
 }

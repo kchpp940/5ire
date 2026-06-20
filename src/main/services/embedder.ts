@@ -12,16 +12,29 @@ import { Stateful } from "@/main/internal/stateful";
 import { Downloader } from "@/main/services/downloader";
 import { Logger } from "@/main/services/logger";
 
+/**
+ * Embedder class handles generation of text embedding vectors
+ * Responsible for model downloading, initialization, removal, and text embedding functions
+ * @extends Stateful<Embedder.State>
+ */
 export class Embedder extends Stateful<Embedder.State> {
   #environment = Container.inject(Environment);
   #downloader = Container.inject(Downloader);
   #logger = Container.inject(Logger).scope("Embedder");
   #emitter = Emitter.create<Embedder.Events>();
 
+  /**
+   * Get event emitter instance
+   * @returns Event emitter instance
+   */
   get emitter() {
     return this.#emitter;
   }
 
+  /**
+   * Create Embedder instance
+   * Initialize state, model name, and required file list
+   */
   constructor() {
     super(() => {
       return {
@@ -34,6 +47,11 @@ export class Embedder extends Stateful<Embedder.State> {
     });
   }
 
+  /**
+   * Initialize embedding model
+   * Check if model files exist, and load the model if they do
+   * @returns Promise<void>
+   */
   async init() {
     const logger = this.#logger.scope("Init");
 
@@ -102,6 +120,11 @@ export class Embedder extends Stateful<Embedder.State> {
       });
   }
 
+  /**
+   * Remove downloaded model
+   * If the model is in ready state, release resources first then delete the folder
+   * @returns Promise<void>
+   */
   async removeModel() {
     const logger = this.#logger.scope("RemoveModel");
 
@@ -128,11 +151,16 @@ export class Embedder extends Stateful<Embedder.State> {
     });
   }
 
+  /**
+   * Download embedding model files
+   * Delete old model files and re-download all required model files
+   * @returns Promise<void>
+   */
   async downloadModel() {
     const logger = this.#logger.scope("DownloadModel");
 
-    if (this.state.status.type === "downloading" || this.state.status.type === "initializing" || this.state.status.type === "ready") {
-      return logger.error("Cannot download model: embedder is not in a downloadable state");
+    if (this.state.status.type !== "unavailable") {
+      return logger.error("Cannot download model: embedder is not in unavailable state");
     }
 
     await rm(this.#environment.embedderModelsFolder, { recursive: true, force: true }).catch((error) => {
@@ -208,37 +236,15 @@ export class Embedder extends Stateful<Embedder.State> {
         });
         this.init().catch(() => {});
       })
-      .catch(async (error) => {
-        const aborted = controller.signal.aborted;
-
-        let partially = false;
-
-        for (const file of DOCUMENT_EMBEDDING_MODEL_FILES) {
-          const folder = join(this.#environment.embedderModelsFolder, DOCUMENT_EMBEDDING_MODEL_NAME);
-          const path = join(folder, file.path || file.name);
-
-          const exists = await stat(path)
-            .then((s) => s.isFile())
-            .catch(() => false);
-
-          if (exists) {
-            partially = true;
-          }
-        }
-
+      .catch((error) => {
         this.update((draft) => {
           draft.status = {
             type: "unavailable",
-            reason: aborted
-              ? "download-cancelled"
-              : partially
-                ? "download-failed"
-                : "model-missing",
+            reason: "model-missing",
           };
         });
 
-        if (aborted) {
-          this.emitter.emit("model-download-cancelled", {});
+        if (controller.signal.aborted) {
           return;
         }
 
@@ -252,6 +258,11 @@ export class Embedder extends Stateful<Embedder.State> {
       });
   }
 
+  /**
+   * Cancel model download
+   * Cancel ongoing downloads by calling the abort method of AbortController
+   * @returns Promise<void>
+   */
   async cancelDownloadModel() {
     const logger = this.#logger.scope("CancelDownloadModel");
 
@@ -262,6 +273,12 @@ export class Embedder extends Stateful<Embedder.State> {
     this.state.status.controller.abort();
   }
 
+  /**
+   * Process text embedding
+   * Convert text to vector representation using the loaded model
+   * @param text Array of text to be embedded
+   * @returns Promise<number[][]> Embedding vector array
+   */
   async embed(text: string[]) {
     const logger = this.#logger.scope("Embed");
 
@@ -298,45 +315,111 @@ export class Embedder extends Stateful<Embedder.State> {
 }
 
 export namespace Embedder {
-  export type UnavailableReason =
-    | "model-missing"
-    | "model-partially-missing"
-    | "pipeline-init-failed"
-    | "download-cancelled"
-    | "download-failed";
-
+  /**
+   * Embedder service status types
+   * Represents the status of the embedder service at different stages
+   */
   export type Status =
     | {
+        /**
+         * Idle state
+         * Embedder service has not been initialized or has completed operations
+         */
         type: "idle";
       }
     | {
+        /**
+         * Initializing state
+         * Embedder service is undergoing initialization process
+         */
         type: "initializing";
       }
     | {
+        /**
+         * Ready state
+         * Embedder service has been successfully initialized and is ready to handle embedding requests
+         */
         type: "ready";
+        /**
+         * Feature extraction pipeline instance
+         * Used to perform actual text embedding operations
+         */
         extractor: FeatureExtractionPipeline;
+        /**
+         * Number of running tasks
+         * Records the current number of embedding requests being processed
+         */
         running: number;
       }
     | {
+        /**
+         * Unavailable state
+         * Embedder service is unavailable for some reason
+         */
         type: "unavailable";
-        reason: UnavailableReason;
+        /**
+         * Reason for unavailability
+         * - model-missing: Model files missing
+         * - model-partially-missing: Model files partially missing
+         * - pipeline-init-failed: Pipeline initialization failed
+         */
+        reason: "model-missing" | "model-partially-missing" | "pipeline-init-failed";
       }
     | {
+        /**
+         * Downloading state
+         * Embedder service is downloading model files
+         */
         type: "downloading";
+        /**
+         * Download progress record
+         * Keyed by filename, records total size and received size for each file
+         */
         progress: Record<string, Record<"total" | "received", number>>;
+        /**
+         * Download controller
+         * Used to cancel ongoing download operations
+         */
         controller: AbortController;
       };
 
+  /**
+   * Complete state definition of the embedder
+   * Includes service status, model name, and required file list
+   */
   export type State = {
+    /**
+     * Status of the embedder service
+     * Represents the current operational stage of the service
+     */
     status: Status;
+    /**
+     * Name of the embedder model
+     * Used to identify the currently used embedding model
+     */
     model: string;
+    /**
+     * Required file list for initializing the embedder model
+     * Lists all model filenames that must exist
+     */
     files: string[];
   };
 
+  /**
+   * Event definitions for the embedder service
+   * Defines various events that the service may trigger
+   */
   export type Events = {
+    /**
+     * Event triggered when model download fails
+     * Emitted when an error occurs during model file download
+     */
     "model-download-failed": {
+      /**
+       * Error message
+       * Contains specific description of download failure reason
+       */
       message: string;
     };
-    "model-download-cancelled": {};
   };
 }
