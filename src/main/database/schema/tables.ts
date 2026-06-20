@@ -306,7 +306,7 @@ const promptColumns = {
   /**
    * System prompt merging strategy, used to specify how to use roleDefinition in conversations; when roleDefinition is empty, mergeStrategy is invalid
    */
-  mergeStrategy: promptMergeStrategy().notNull().default("merge"),
+  mergeStrategy: promptMergeStrategy("merge_strategy").notNull().default("merge"),
   /**
    * Current version number
    */
@@ -351,13 +351,21 @@ const promptColumns = {
    * Provider for the prompt
    */
   provider: varchar(),
+  /**
+   * Legacy ID for migration from SQLite
+   */
+  legacyId: varchar("legacy_id", { length: 300 }),
 };
 
 /**
  * The `prompts` table is used to store user-defined prompts.
  */
 export const prompt = pgTable("prompts", promptColumns, (table) => {
-  return [index().on(table.createTime), index().on(table.name)];
+  return [
+    index().on(table.createTime),
+    index().on(table.name),
+    uniqueIndex().on(table.legacyId).where(isNotNull(table.legacyId)),
+  ];
 });
 
 const promptVersionColumns = {
@@ -429,11 +437,7 @@ const promptVersionColumns = {
  * The `prompt_versions` table stores historical versions of prompts.
  */
 export const promptVersion = pgTable("prompt_versions", promptVersionColumns, (table) => {
-  return [
-    index().on(table.promptId),
-    index().on(table.version),
-    uniqueIndex().on(table.promptId, table.version),
-  ];
+  return [index().on(table.promptId), index().on(table.version), uniqueIndex().on(table.promptId, table.version)];
 });
 
 const promptDraftColumns = {

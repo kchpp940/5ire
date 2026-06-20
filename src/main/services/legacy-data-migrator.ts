@@ -432,6 +432,147 @@ export class LegacyDataMigrator extends Stateful.Persistable<LegacyDataMigrator.
     });
   }
 
+  #parseJsonField<T>(raw: string | null | undefined, fallback: T): T {
+    if (!raw) return fallback;
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      return fallback;
+    }
+  }
+
+  #parseVariables(text: string): string[] {
+    const regex = /\{\{([^}]+)\}\}/g;
+    const variables: string[] = [];
+    let m = regex.exec(text);
+    while (m) {
+      const variable = m[1].trim();
+      if (variable !== "" && !variables.includes(variable)) {
+        variables.push(variable);
+      }
+      m = regex.exec(text);
+    }
+    return variables;
+  }
+
+  async #migratePrompts(context: LegacyDataMigrator.Context) {
+    const logger = this.#logger.scope("MigratePrompts");
+    const schema = this.#database.schema;
+    const client = this.#database.client;
+
+    if (this.state.migrated.prompts) {
+      return logger.info(
+        `Migrate prompts completed (total ${this.state.migrated.prompts.total}). No migration needed.`,
+      );
+    }
+
+    const migratedPrompts: string[] = [];
+
+    for (const legacyPrompt of this.#iterateLegacyDatabaseTable<{
+      id: string;
+      name: string | null;
+      systemMessage: string | null;
+      userMessage: string | null;
+      systemVariables: string | null;
+      userVariables: string | null;
+      models: string | null;
+      temperature: number | null;
+      maxTokens: number | null;
+      createdAt: number | null;
+      updatedAt: number | null;
+      pinedAt: number | null;
+    }>(context.legacySqliteDB, "prompts")) {
+      const systemMessage = legacyPrompt.systemMessage || "";
+      const userMessage = legacyPrompt.userMessage || "";
+
+      const systemVariables = this.#parseJsonField<string[]>(
+        legacyPrompt.systemVariables,
+        this.#parseVariables(systemMessage),
+      );
+      const userVariables = this.#parseJsonField<string[]>(
+        legacyPrompt.userVariables,
+        this.#parseVariables(userMessage),
+      );
+      const models = this.#parseJsonField<string[]>(legacyPrompt.models, []);
+
+      const systemVariableSchemas = systemVariables.map((name) => ({
+        name,
+        description: "",
+        defaultValue: "",
+        required: false,
+      }));
+      const userVariableSchemas = userVariables.map((name) => ({
+        name,
+        description: "",
+        defaultValue: "",
+        required: false,
+      }));
+
+      const createTime = legacyPrompt.createdAt ? new Date(legacyPrompt.createdAt * 1000) : undefined;
+      const updateTime = legacyPrompt.updatedAt ? new Date(legacyPrompt.updatedAt * 1000) : undefined;
+      const pinedTime = legacyPrompt.pinedAt ? new Date(legacyPrompt.pinedAt * 1000) : null;
+
+      try {
+        await client.transaction(async (tx) => {
+          const [inserted] = await tx
+            .insert(schema.prompt)
+            .values({
+              name: legacyPrompt.name?.slice(0, 300) || "Unnamed",
+              roleDefinitionTemplate: systemMessage,
+              instructionTemplate: userMessage,
+              roleDefinitionVariables: systemVariables,
+              instructionTemplateVariables: userVariables,
+              roleDefinitionVariableSchemas: systemVariableSchemas,
+              instructionTemplateVariableSchemas: userVariableSchemas,
+              maxTokens: legacyPrompt.maxTokens ?? undefined,
+              temperature: legacyPrompt.temperature ? Math.round(legacyPrompt.temperature) : undefined,
+              models,
+              createTime,
+              updateTime,
+              pinedTime,
+              legacyId: legacyPrompt.id,
+            })
+            .onConflictDoNothing({
+              target: schema.prompt.legacyId,
+              where: isNotNull(schema.prompt.legacyId),
+            })
+            .returning({ id: schema.prompt.id });
+
+          const promptId = inserted?.id;
+
+          if (promptId) {
+            await tx.insert(schema.promptVersion).values({
+              promptId,
+              version: 1,
+              name: legacyPrompt.name?.slice(0, 300) || "Unnamed",
+              roleDefinitionTemplate: systemMessage,
+              instructionTemplate: userMessage,
+              roleDefinitionVariableSchemas: systemVariableSchemas,
+              instructionTemplateVariableSchemas: userVariableSchemas,
+              maxTokens: legacyPrompt.maxTokens ?? undefined,
+              temperature: legacyPrompt.temperature ? Math.round(legacyPrompt.temperature) : undefined,
+              models,
+              publishedAt: createTime || new Date(),
+            });
+
+            migratedPrompts.push(legacyPrompt.id);
+          }
+        });
+      } catch (error) {
+        logger.warning(`Failed to insert prompt "${legacyPrompt.id}"`, error);
+      }
+    }
+
+    logger.info(`Migrate prompts completed. Total: ${migratedPrompts.length} migrated.`);
+
+    this.update((draft) => {
+      draft.migrated.prompts = {
+        total: migratedPrompts.length,
+        time: new Date(),
+      };
+    });
+  }
+
   /**
    * Execute database migration
    *
@@ -468,6 +609,9 @@ export class LegacyDataMigrator extends Stateful.Persistable<LegacyDataMigrator.
       });
       await this.#migrateServersConfig(context).catch((error) => {
         logger.error("Failed to migrate servers config", error);
+      });
+      await this.#migratePrompts(context).catch((error) => {
+        logger.error("Failed to migrate prompts", error);
       });
     } finally {
       this.update((draft) => {
@@ -517,7 +661,7 @@ export namespace LegacyDataMigrator {
      */
     migrated: Partial<
       Record<
-        "collections" | "documents" | "documentChunks" | "transitionChatCollections" | "serversConfig",
+        "collections" | "documents" | "documentChunks" | "transitionChatCollections" | "serversConfig" | "prompts",
         {
           time: Date;
           total: number;
