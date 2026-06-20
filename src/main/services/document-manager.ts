@@ -12,6 +12,9 @@ import {
 } from "@/main/constants";
 import { Database } from "@/main/database";
 import { Container } from "@/main/internal/container";
+import { Emitter } from "@/main/internal/emitter";
+import { Stateful } from "@/main/internal/stateful";
+import { DocumentEmbedder } from "@/main/services/document-embedder";
 import { DocumentExtractor } from "@/main/services/document-extractor";
 import { Embedder } from "@/main/services/embedder";
 import { LegacyDataMigrator } from "@/main/services/legacy-data-migrator";
@@ -20,13 +23,17 @@ import { Logger } from "@/main/services/logger";
 /**
  * DocumentManager class is used to manage document collections and documents
  * Provides functions to create, delete, update collections and import, delete documents
+ * Manages ImportJob lifecycle with real-time event streaming
  */
-export class DocumentManager {
+export class DocumentManager extends Stateful<DocumentManager.State> {
   #database = Container.inject(Database);
   #logger = Container.inject(Logger).scope("DocumentsManager");
   #embedder = Container.inject(Embedder);
   #extractor = Container.inject(DocumentExtractor);
+  #documentEmbedder = Container.inject(DocumentEmbedder);
   #legacyDataMigrator = Container.inject(LegacyDataMigrator);
+  #emitter = Emitter.create<DocumentManager.Events>();
+  #listenersInitialized = false;
 
   /**
    * Constructor to initialize the DocumentManager instance
@@ -40,6 +47,10 @@ export class DocumentManager {
    * - normalizer: function to generate cache keys from method arguments
    */
   constructor() {
+    super(() => ({
+      importJobs: {},
+    }));
+
     this.liveCollections = memoize(this.liveCollections.bind(this), {
       primitive: true,
       promise: true,
@@ -48,6 +59,254 @@ export class DocumentManager {
       primitive: true,
       promise: true,
       normalizer: (args) => args[0],
+    });
+    this.liveImportJobs = memoize(this.liveImportJobs.bind(this), {
+      primitive: true,
+    });
+  }
+
+  /**
+   * Get the event emitter instance for ImportJob events
+   */
+  get emitter() {
+    return this.#emitter;
+  }
+
+  /**
+   * Ensure DocumentEmbedder event listeners are set up
+   */
+  #ensureListeners() {
+    if (this.#listenersInitialized) {
+      return;
+    }
+    this.#listenersInitialized = true;
+
+    const embedderEmitter = this.#documentEmbedder.emitter;
+
+    embedderEmitter.on("document-process-started", ({ id }) => {
+      this.#updateDocumentInJobs(id, (doc) => {
+        doc.stage = "extracting";
+        doc.progress = 0;
+        doc.status = "processing";
+      });
+    });
+
+    embedderEmitter.on("document-stage-changed", ({ id, stage, progress }) => {
+      this.#updateDocumentInJobs(id, (doc) => {
+        doc.stage = stage;
+        doc.progress = progress;
+        doc.status = "processing";
+      });
+    });
+
+    embedderEmitter.on("document-progress-updated", ({ id, stage, progress }) => {
+      this.#updateDocumentInJobs(id, (doc) => {
+        doc.stage = stage;
+        doc.progress = progress;
+        doc.status = "processing";
+      });
+    });
+
+    embedderEmitter.on("document-process-completed", ({ id }) => {
+      this.#updateDocumentInJobs(id, (doc) => {
+        doc.stage = "saving";
+        doc.progress = 1;
+        doc.status = "completed";
+        doc.error = null;
+      });
+      this.#emitter.emit("import-job-document-completed", { documentId: id });
+    });
+
+    embedderEmitter.on("document-embed-failed", ({ id, message }) => {
+      this.#updateDocumentInJobs(id, (doc) => {
+        doc.status = "failed";
+        doc.error = message;
+      });
+      this.#emitter.emit("import-job-document-failed", { documentId: id, error: message });
+    });
+  }
+
+  /**
+   * Update a document's state across all import jobs that contain it
+   */
+  #updateDocumentInJobs(documentId: string, updater: (doc: DocumentManager.ImportJobDocument) => void) {
+    this.update((draft) => {
+      for (const job of Object.values(draft.importJobs)) {
+        const doc = job.documents[documentId];
+        if (doc) {
+          updater(doc);
+          const stats = this.#calcJobStats(job);
+          job.pendingCount = stats.pending;
+          job.processingCount = stats.processing;
+          job.completedCount = stats.completed;
+          job.failedCount = stats.failed;
+          job.progress = stats.progress;
+          if (stats.completed + stats.failed === Object.keys(job.documents).length) {
+            job.status = stats.failed > 0 ? "completed_with_errors" : "completed";
+          }
+        }
+      }
+    });
+  }
+
+  /**
+   * Calculate job statistics from documents
+   */
+  #calcJobStats(job: DocumentManager.ImportJob) {
+    let pending = 0;
+    let processing = 0;
+    let completed = 0;
+    let failed = 0;
+    let totalProgress = 0;
+    const docs = Object.values(job.documents);
+    for (const doc of docs) {
+      switch (doc.status) {
+        case "pending":
+          pending++;
+          break;
+        case "processing":
+          processing++;
+          totalProgress += doc.progress / 3;
+          if (doc.stage === "embedding") totalProgress += 1 / 3;
+          if (doc.stage === "saving") totalProgress += 2 / 3;
+          break;
+        case "completed":
+          completed++;
+          totalProgress += 1;
+          break;
+        case "failed":
+          failed++;
+          totalProgress += 1;
+          break;
+      }
+    }
+    const progress = docs.length > 0 ? totalProgress / docs.length : 0;
+    return { pending, processing, completed, failed, progress };
+  }
+
+  /**
+   * Create a new import job
+   * @returns The created import job
+   */
+  createImportJob(options: DocumentManager.CreateImportJobOptions): DocumentManager.ImportJob {
+    this.#ensureListeners();
+
+    const jobId = crypto.randomUUID();
+    const now = new Date();
+
+    const documents: Record<string, DocumentManager.ImportJobDocument> = {};
+    for (const file of options.files) {
+      documents[file.id] = {
+        id: file.id,
+        name: file.name,
+        url: file.url,
+        size: file.size,
+        mimetype: file.mimetype,
+        status: "pending",
+        stage: null,
+        progress: 0,
+        error: null,
+      };
+    }
+
+    const job: DocumentManager.ImportJob = {
+      id: jobId,
+      collectionId: options.collectionId,
+      collectionName: options.collectionName,
+      createTime: now,
+      updateTime: now,
+      status: "processing",
+      documents,
+      pendingCount: options.files.length,
+      processingCount: 0,
+      completedCount: 0,
+      failedCount: 0,
+      progress: 0,
+    };
+
+    this.update((draft) => {
+      draft.importJobs[jobId] = job;
+    });
+
+    this.#emitter.emit("import-job-created", { jobId });
+
+    return job;
+  }
+
+  /**
+   * Get an import job by ID
+   */
+  getImportJob(jobId: string): DocumentManager.ImportJob | undefined {
+    return this.state.importJobs[jobId];
+  }
+
+  /**
+   * List all active import jobs (not archived)
+   */
+  listImportJobs(): DocumentManager.ImportJob[] {
+    return Object.values(this.state.importJobs).sort(
+      (a, b) => b.createTime.getTime() - a.createTime.getTime(),
+    );
+  }
+
+  /**
+   * Retry all failed documents in an import job
+   */
+  async retryImportJob(jobId: string) {
+    const job = this.state.importJobs[jobId];
+    if (!job) {
+      throw new Error(`Import job not found: ${jobId}`);
+    }
+
+    const failedDocs = Object.values(job.documents).filter((d) => d.status === "failed");
+    for (const doc of failedDocs) {
+      await this.retryDocument({ id: doc.id });
+    }
+
+    this.update((draft) => {
+      const j = draft.importJobs[jobId];
+      if (j) {
+        for (const doc of failedDocs) {
+          const d = j.documents[doc.id];
+          if (d) {
+            d.status = "pending";
+            d.stage = null;
+            d.progress = 0;
+            d.error = null;
+          }
+        }
+        const stats = this.#calcJobStats(j);
+        j.pendingCount = stats.pending;
+        j.processingCount = stats.processing;
+        j.completedCount = stats.completed;
+        j.failedCount = stats.failed;
+        j.progress = stats.progress;
+        j.status = "processing";
+        j.updateTime = new Date();
+      }
+    });
+  }
+
+  /**
+   * Listen to import job changes in real-time
+   */
+  liveImportJobs() {
+    this.#ensureListeners();
+    const abort = new AbortController();
+
+    return new ReadableStream<DocumentManager.ImportJob[]>({
+      cancel: () => {
+        abort.abort();
+      },
+      start: (controller) => {
+        controller.enqueue(this.listImportJobs());
+
+        const unsubscribe = this.subscribe(() => {
+          controller.enqueue(this.listImportJobs());
+        });
+
+        abort.signal.addEventListener("abort", unsubscribe);
+      },
     });
   }
 
@@ -787,20 +1046,83 @@ export class DocumentManager {
   /**
    * Import documents with pre-checked results
    * Only imports valid (non-duplicate, non-error) files
-   * @param options Options containing collection ID and pre-check results
-   * @returns Promise<void>
+   * Creates and returns an ImportJob for tracking progress
+   * @param options Options containing collection ID, collection name, and pre-check results
+   * @returns Promise<ImportJob> The created import job for tracking progress
    */
   async importDocumentsWithPreCheck(options: DocumentManager.ImportDocumentsWithPreCheckOptions) {
-    const validUrls = options.files.filter((f) => f.status === "valid").map((f) => f.url);
+    const validFiles = options.files.filter((f) => f.status === "valid");
 
-    if (validUrls.length === 0) {
+    if (validFiles.length === 0) {
       throw new Error("No valid files to import.");
     }
 
-    return this.importDocuments({
-      collection: options.collection,
-      urls: validUrls,
+    const validUrls = validFiles.map((f) => f.url);
+
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+
+    const insertedDocs = await client.transaction(async (tx) => {
+      const exists = await tx
+        .$count(schema.collection, eq(schema.collection.id, options.collection))
+        .then((count) => count > 0);
+
+      if (!exists) {
+        throw new Error("Collection does not exist.");
+      }
+
+      const stringifiedUrlSet = new Set(validUrls.map((url) => new URL(url).toString()));
+      const stringifiedUrls = Array.from(stringifiedUrlSet);
+
+      for (const url of stringifiedUrls) {
+        const dup = await tx
+          .$count(
+            schema.document,
+            and(eq(schema.document.url, url), eq(schema.document.collectionId, options.collection)),
+          )
+          .then((count) => count > 0);
+        if (dup) {
+          throw new Error(`Document ${url} already exists.`);
+        }
+      }
+
+      const values = stringifiedUrls.map((url) => {
+        let name = url;
+        if (url.startsWith("file://")) {
+          name = basename(fileURLToPath(url));
+        }
+        const preCheckFile = validFiles.find((f) => f.url === url);
+        return {
+          url,
+          collectionId: options.collection,
+          name,
+          status: "pending" as const,
+          mimetype: preCheckFile?.mimetype || "unknown",
+          size: preCheckFile?.size || 0,
+          error: null,
+        };
+      });
+
+      return tx
+        .insert(schema.document)
+        .values(values)
+        .returning({ id: schema.document.id, name: schema.document.name, url: schema.document.url, size: schema.document.size, mimetype: schema.document.mimetype })
+        .execute();
     });
+
+    const job = this.createImportJob({
+      collectionId: options.collection,
+      collectionName: options.collectionName,
+      files: insertedDocs.map((d) => ({
+        id: d.id,
+        name: d.name,
+        url: d.url,
+        size: d.size,
+        mimetype: d.mimetype,
+      })),
+    });
+
+    return job;
   }
 
   /**
@@ -1165,8 +1487,182 @@ export namespace DocumentManager {
      */
     collection: string;
     /**
+     * Target collection name (for display purposes in the import job)
+     */
+    collectionName: string;
+    /**
      * Pre-checked file results
      */
     files: FilePreCheckResult[];
+  };
+
+  /**
+   * Document processing stage within an import job
+   */
+  export type ImportJobDocumentStage = "extracting" | "embedding" | "saving" | null;
+
+  /**
+   * Document status within an import job
+   */
+  export type ImportJobDocumentStatus = "pending" | "processing" | "completed" | "failed";
+
+  /**
+   * A single document's state within an import job
+   */
+  export type ImportJobDocument = {
+    /**
+     * Document ID
+     */
+    id: string;
+    /**
+     * Document name (filename)
+     */
+    name: string;
+    /**
+     * Document URL
+     */
+    url: string;
+    /**
+     * Document size in bytes
+     */
+    size: number;
+    /**
+     * Document MIME type
+     */
+    mimetype: string;
+    /**
+     * Current document status
+     */
+    status: ImportJobDocumentStatus;
+    /**
+     * Current processing stage (null if not yet started)
+     */
+    stage: ImportJobDocumentStage;
+    /**
+     * Progress within the current stage (0-1)
+     */
+    progress: number;
+    /**
+     * Error message if status is "failed"
+     */
+    error: string | null;
+  };
+
+  /**
+   * Import job overall status
+   */
+  export type ImportJobStatus = "processing" | "completed" | "completed_with_errors";
+
+  /**
+   * Represents a batch import job that tracks the processing state of multiple documents
+   */
+  export type ImportJob = {
+    /**
+     * Unique import job ID
+     */
+    id: string;
+    /**
+     * Target collection ID
+     */
+    collectionId: string;
+    /**
+     * Target collection name for display
+     */
+    collectionName: string;
+    /**
+     * Job creation timestamp
+     */
+    createTime: Date;
+    /**
+     * Last update timestamp
+     */
+    updateTime: Date;
+    /**
+     * Overall job status
+     */
+    status: ImportJobStatus;
+    /**
+     * Map of document IDs to their processing state
+     */
+    documents: Record<string, ImportJobDocument>;
+    /**
+     * Number of pending documents
+     */
+    pendingCount: number;
+    /**
+     * Number of documents currently being processed
+     */
+    processingCount: number;
+    /**
+     * Number of successfully completed documents
+     */
+    completedCount: number;
+    /**
+     * Number of failed documents
+     */
+    failedCount: number;
+    /**
+     * Overall job progress (0-1)
+     */
+    progress: number;
+  };
+
+  /**
+   * Options for creating a new import job
+   */
+  export type CreateImportJobOptions = {
+    /**
+     * Target collection ID
+     */
+    collectionId: string;
+    /**
+     * Target collection name
+     */
+    collectionName: string;
+    /**
+     * Files to include in the import job
+     */
+    files: {
+      id: string;
+      name: string;
+      url: string;
+      size: number;
+      mimetype: string;
+    }[];
+  };
+
+  /**
+   * DocumentManager state managed by Stateful
+   */
+  export type State = {
+    /**
+     * Map of import job IDs to their current state
+     */
+    importJobs: Record<string, ImportJob>;
+  };
+
+  /**
+   * Import job events emitted by the DocumentManager
+   */
+  export type Events = {
+    /**
+     * Emitted when a new import job is created
+     */
+    "import-job-created": {
+      jobId: string;
+    };
+    /**
+     * Emitted when a document within a job completes successfully
+     */
+    "import-job-document-completed": {
+      documentId: string;
+    };
+    /**
+     * Emitted when a document within a job fails
+     */
+    "import-job-document-failed": {
+      documentId: string;
+      error: string;
+    };
   };
 }

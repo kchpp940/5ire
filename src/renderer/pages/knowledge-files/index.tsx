@@ -23,7 +23,7 @@ import useToast from "@/hooks/useToast";
 import { captureException } from "@/renderer/logging";
 import { useEmbedder } from "@/renderer/next/hooks/remote/use-embedder";
 import { useLiveCollections } from "@/renderer/next/hooks/remote/use-live-collections";
-import { useLiveDocuments } from "@/renderer/next/hooks/remote/use-live-documents";
+import { useLiveImportJobs } from "@/renderer/next/hooks/remote/use-live-import-jobs";
 import Grid from "./Grid";
 import ImportWizard from "./ImportWizard";
 import ImportTaskPanel from "./ImportTaskPanel";
@@ -96,10 +96,11 @@ export default function KnowledgeFiles() {
   const toast = useToast();
 
   const collections = useLiveCollections();
-  const documents = useLiveDocuments(id || "");
+  const importJobs = useLiveImportJobs();
 
   const [wizardOpen, setWizardOpen] = useState(false);
   const [taskPanelOpen, setTaskPanelOpen] = useState(false);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
   const collection = useMemo(() => {
     if (!id) {
@@ -110,15 +111,16 @@ export default function KnowledgeFiles() {
   }, [collections, id]);
 
   const hasActiveTasks = useMemo(() => {
-    return documents.rows.some(
-      (doc) => doc.status === "pending" || doc.status === "processing" || doc.status === "failed",
+    return importJobs.some(
+      (job) => job.pendingCount > 0 || job.processingCount > 0 || job.failedCount > 0,
     );
-  }, [documents.rows]);
+  }, [importJobs]);
 
-  const handleImportComplete = () => {
-    toast.notifySuccess(t("Knowledge.Notification.ImportStarted", {
-      defaultValue: "Files have been added to the processing queue",
-    }));
+  const handleImportComplete = (jobId: string) => {
+    setActiveJobId(jobId);
+    setTimeout(() => {
+      setTaskPanelOpen(true);
+    }, 1200);
   };
 
   return (
@@ -164,7 +166,13 @@ export default function KnowledgeFiles() {
           />
           <ImportTaskPanel
             open={taskPanelOpen}
-            onOpenChange={setTaskPanelOpen}
+            onOpenChange={(open) => {
+              setTaskPanelOpen(open);
+              if (!open) {
+                setActiveJobId(null);
+              }
+            }}
+            activeJobId={activeJobId}
           />
         </>
       )}

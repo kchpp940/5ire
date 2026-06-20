@@ -42,7 +42,7 @@ type ImportWizardProps = {
   collectionName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onImportComplete?: () => void;
+  onImportComplete?: (jobId: string) => void;
 };
 
 type WizardStep = "select-files" | "pre-check" | "confirm" | "importing";
@@ -150,18 +150,24 @@ export default function ImportWizard(props: ImportWizardProps) {
     setImportProgress(0);
 
     try {
-      await window.bridge.documentManager.importDocumentsWithPreCheck({
+      const job = await window.bridge.documentManager.importDocumentsWithPreCheck({
         collection: collectionId,
+        collectionName: collectionName,
         files: preCheckResult.files,
       });
 
       setImportProgress(100);
-      notifySuccess(t("Knowledge.Notification.ImportSuccess", { defaultValue: "Files imported successfully" }));
-      onImportComplete?.();
+      notifySuccess(
+        t("Knowledge.Notification.ImportSuccess", {
+          defaultValue: "{{count}} files added to processing queue",
+          count: Object.keys(job.documents).length,
+        }),
+      );
+      onImportComplete?.(job.id);
 
       setTimeout(() => {
         handleOpenChange(false);
-      }, 1500);
+      }, 1200);
     } catch (err) {
       const error = asError(err);
       captureException(error);
@@ -170,7 +176,7 @@ export default function ImportWizard(props: ImportWizardProps) {
     } finally {
       setIsImporting(false);
     }
-  }, [preCheckResult, collectionId, notifySuccess, notifyError, t, onImportComplete, handleOpenChange]);
+  }, [preCheckResult, collectionId, collectionName, notifySuccess, notifyError, t, onImportComplete, handleOpenChange]);
 
   const validFiles = useMemo(
     () => preCheckResult?.files.filter((f) => f.status === "valid") || [],

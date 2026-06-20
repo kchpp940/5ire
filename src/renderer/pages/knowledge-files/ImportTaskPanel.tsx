@@ -38,6 +38,8 @@ import {
   ClockRegular,
   WarningFilled,
   WarningRegular,
+  ChevronDownFilled,
+  ChevronRightFilled,
 } from "@fluentui/react-icons";
 import { asError } from "catch-unknown";
 import { useMemo, useState } from "react";
@@ -45,22 +47,9 @@ import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 import useToast from "@/hooks/useToast";
 import { captureException } from "@/renderer/logging";
-import { useDocumentEmbedder } from "@/renderer/next/hooks/remote/use-document-embedder";
 import { useLiveCollections } from "@/renderer/next/hooks/remote/use-live-collections";
-import { useLiveDocuments } from "@/renderer/next/hooks/remote/use-live-documents";
+import { useLiveImportJobs, type ImportJob } from "@/renderer/next/hooks/remote/use-live-import-jobs";
 import ConfirmDialog from "renderer/components/ConfirmDialog";
-
-type LiveDocument = {
-  id: string;
-  name: string;
-  url: string;
-  status: "pending" | "processing" | "completed" | "failed";
-  error: string | null;
-  createTime: Date;
-  updateTime: Date;
-  size: number;
-  chunks: number;
-};
 
 const RetryIcon = bundleIcon(ArrowRepeatAllFilled, ArrowRepeatAllRegular);
 const DeleteIcon = bundleIcon(DeleteFilled, DeleteRegular);
@@ -71,24 +60,21 @@ const SuccessIcon = bundleIcon(CheckmarkCircleFilled, CheckmarkCircleRegular);
 const ErrorIcon = bundleIcon(DismissCircleFilled, DismissCircleRegular);
 const ProcessingIcon = bundleIcon(PlayCircleFilled, PlayCircleRegular);
 const WarningIcon = bundleIcon(WarningFilled, WarningRegular);
+const ChevronDown = bundleIcon(ChevronDownFilled, ChevronDownFilled);
+const ChevronRight = bundleIcon(ChevronRightFilled, ChevronRightFilled);
 
 type ImportTaskPanelProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  activeJobId?: string | null;
 };
 
 type TaskStatus = "pending" | "extracting" | "embedding" | "saving" | "completed" | "failed";
 
-const getTaskStatus = (doc: LiveDocument, processing: Record<string, { status: string; progress: number }>): TaskStatus => {
+const getTaskStatus = (doc: ImportJob["documents"][string]): TaskStatus => {
   if (doc.status === "completed") return "completed";
   if (doc.status === "failed") return "failed";
-  if (doc.status === "processing") {
-    const p = processing[doc.id];
-    if (p) {
-      return p.status as TaskStatus;
-    }
-    return "extracting";
-  }
+  if (doc.status === "processing" && doc.stage) return doc.stage;
   return "pending";
 };
 
@@ -100,39 +86,59 @@ const formatFileSize = (bytes: number) => {
   return `${value.toFixed(value < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
 };
 
+const formatTime = (iso: string) => {
+  try {
+    return new Date(iso).toLocaleTimeString();
+  } catch {
+    return "";
+  }
+};
+
 export default function ImportTaskPanel(props: ImportTaskPanelProps) {
-  const { open, onOpenChange } = props;
+  const { open, onOpenChange, activeJobId } = props;
   const { id } = useParams();
   const { t } = useTranslation();
   const { notifySuccess, notifyError } = useToast();
 
-  const documents = useLiveDocuments(id || "");
-  const embedder = useDocumentEmbedder();
+  const jobs = useLiveImportJobs();
   const collections = useLiveCollections();
 
-  const [retryingId, setRetryingId] = useState<string | null>(null);
-  const [movingId, setMovingId] = useState<string | null>(null);
+  const [retryingDocId, setRetryingDocId] = useState<string | null>(null);
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null);
+  const [movingDocId, setMovingDocId] = useState<string | null>(null);
   const [moveCollectionId, setMoveCollectionId] = useState<string>("");
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingDocId, setDeletingDocId] = useState<string | null>(null);
   const [showMoveDialog, setShowMoveDialog] = useState(false);
+  const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set());
 
-  const activeDocuments = useMemo(() => {
-    return documents.rows.filter(
-      (doc) => doc.status !== "completed",
-    );
-  }, [documents.rows]);
+  const toggleJobExpanded = (jobId: string) => {
+    setExpandedJobs((prev) => {
+      const next = new Set(prev);
+      if (next.has(jobId)) {
+        next.delete(jobId);
+      } else {
+        next.add(jobId);
+      }
+      return next;
+    });
+  };
 
-  const stats = useMemo(() => {
-    const total = documents.rows.length;
-    const pending = documents.rows.filter((d) => d.status === "pending").length;
-    const processing = documents.rows.filter((d) => d.status === "processing").length;
-    const completed = documents.rows.filter((d) => d.status === "completed").length;
-    const failed = documents.rows.filter((d) => d.status === "failed").length;
-    return { total, pending, processing, completed, failed };
-  }, [documents.rows]);
+  const totalStats = useMemo(() => {
+    let pending = 0;
+    let processing = 0;
+    let completed = 0;
+    let failed = 0;
+    for (const job of jobs) {
+      pending += job.pendingCount;
+      processing += job.processingCount;
+      completed += job.completedCount;
+      failed += job.failedCount;
+    }
+    return { pending, processing, completed, failed, total: jobs.length };
+  }, [jobs]);
 
-  const handleRetry = async (docId: string) => {
-    setRetryingId(docId);
+  const handleRetryDoc = async (docId: string) => {
+    setRetryingDocId(docId);
     try {
       await window.bridge.documentManager.retryDocument({ id: docId });
       notifySuccess(t("Knowledge.Notification.DocumentRetried", { defaultValue: "Document re-queued successfully" }));
@@ -141,11 +147,29 @@ export default function ImportTaskPanel(props: ImportTaskPanelProps) {
       captureException(error);
       notifyError(error.message);
     } finally {
-      setRetryingId(null);
+      setRetryingDocId(null);
     }
   };
 
-  const handleDelete = async (docId: string) => {
+  const handleRetryJob = async (jobId: string) => {
+    setRetryingJobId(jobId);
+    try {
+      await window.bridge.documentManager.retryImportJob(jobId);
+      notifySuccess(
+        t("Knowledge.Notification.ImportJobRetried", {
+          defaultValue: "Failed documents re-queued",
+        }),
+      );
+    } catch (err) {
+      const error = asError(err);
+      captureException(error);
+      notifyError(error.message);
+    } finally {
+      setRetryingJobId(null);
+    }
+  };
+
+  const handleDeleteDoc = async (docId: string) => {
     try {
       await window.bridge.documentManager.deleteDocument({ id: docId });
       notifySuccess(t("Knowledge.Notification.DocumentDeleted"));
@@ -154,12 +178,12 @@ export default function ImportTaskPanel(props: ImportTaskPanelProps) {
       captureException(error);
       notifyError(error.message);
     } finally {
-      setDeletingId(null);
+      setDeletingDocId(null);
     }
   };
 
-  const handleMove = async (docId: string, targetCollectionId: string) => {
-    setMovingId(docId);
+  const handleMoveDoc = async (docId: string, targetCollectionId: string) => {
+    setMovingDocId(docId);
     try {
       await window.bridge.documentManager.moveDocumentToCollection({
         documentId: docId,
@@ -174,105 +198,96 @@ export default function ImportTaskPanel(props: ImportTaskPanelProps) {
       captureException(error);
       notifyError(error.message);
     } finally {
-      setMovingId(null);
+      setMovingDocId(null);
       setMoveCollectionId("");
     }
   };
 
   const openMoveDialog = (docId: string) => {
-    setMovingId(docId);
+    setMovingDocId(docId);
     setMoveCollectionId("");
     setShowMoveDialog(true);
   };
 
-  const handleRetryAllFailed = async () => {
-    const failedDocs = documents.rows.filter((d) => d.status === "failed");
-    for (const doc of failedDocs) {
-      try {
-        await window.bridge.documentManager.retryDocument({ id: doc.id });
-      } catch (err) {
-        captureException(asError(err));
-      }
-    }
-    notifySuccess(
-      t("Knowledge.Notification.AllFailedRetried", {
-        defaultValue: "{{count}} documents re-queued",
-        count: failedDocs.length,
-      }),
-    );
-  };
-
   return (
     <Dialog open={open} onOpenChange={(_, data) => onOpenChange(data.open)}>
-      <DialogSurface className="min-w-[640px] max-w-[800px]">
+      <DialogSurface className="min-w-[680px] max-w-[840px] max-h-[80vh]">
         <DialogBody>
           <DialogTitle>
             {t("Knowledge.ImportTaskPanel.Title", { defaultValue: "Import Tasks" })}
           </DialogTitle>
           <DialogContent>
             <div className="flex flex-col gap-4">
-              <div className="flex gap-6 p-3 bg-gray-50 rounded-lg">
+              <div className="flex gap-6 p-3 bg-gray-50 rounded-lg flex-wrap">
+                <StatItem
+                  label={t("Knowledge.ImportTaskPanel.Jobs", { defaultValue: "Jobs" })}
+                  value={totalStats.total}
+                  icon={<ProcessingIcon fontSize={16} className="text-blue-500" />}
+                />
                 <StatItem
                   label={t("Document.Status.Pending")}
-                  value={stats.pending}
+                  value={totalStats.pending}
                   icon={<PendingIcon fontSize={16} className="text-gray-500" />}
                 />
                 <StatItem
                   label={t("Document.Status.Processing")}
-                  value={stats.processing}
+                  value={totalStats.processing}
                   icon={<Spinner size="extra-tiny" />}
                 />
                 <StatItem
                   label={t("Document.Status.Completed")}
-                  value={stats.completed}
+                  value={totalStats.completed}
                   icon={<SuccessIcon fontSize={16} className="text-green-500" />}
                 />
                 <StatItem
                   label={t("Document.Status.Failed")}
-                  value={stats.failed}
+                  value={totalStats.failed}
                   icon={<ErrorIcon fontSize={16} className="text-red-500" />}
                 />
               </div>
 
-              {stats.failed > 0 && (
-                <div className="flex justify-end">
-                  <Button
-                    appearance="primary"
-                    size="small"
-                    icon={<RetryIcon />}
-                    onClick={handleRetryAllFailed}
-                  >
-                    {t("Knowledge.ImportTaskPanel.RetryAllFailed", {
-                      defaultValue: "Retry All Failed",
-                    })}
-                  </Button>
-                </div>
-              )}
-
-              <div className="border rounded-lg max-h-[400px] overflow-y-auto">
-                {activeDocuments.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-gray-500">
-                    <SuccessIcon fontSize={32} className="text-green-400 mb-2" />
+              <div className="border rounded-lg max-h-[480px] overflow-y-auto">
+                {jobs.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-16 text-gray-500">
+                    <SuccessIcon fontSize={36} className="text-green-400 mb-3" />
                     <p className="text-sm">
-                      {t("Knowledge.ImportTaskPanel.AllCompleted", {
-                        defaultValue: "All documents have been processed",
+                      {t("Knowledge.ImportTaskPanel.NoJobs", {
+                        defaultValue: "No active import jobs",
                       })}
                     </p>
                   </div>
                 ) : (
                   <div className="divide-y">
-                    {activeDocuments.map((doc) => (
-                      <TaskRow
-                        key={doc.id}
-                        document={doc}
-                        processing={embedder.processingDocuments[doc.id]}
-                        onRetry={() => handleRetry(doc.id)}
-                        onDelete={() => setDeletingId(doc.id)}
-                        onMove={() => openMoveDialog(doc.id)}
-                        isRetrying={retryingId === doc.id}
-                        isMoving={movingId === doc.id}
-                      />
-                    ))}
+                    {jobs.map((job) => {
+                      const isActive = job.id === activeJobId;
+                      const expanded = isActive || expandedJobs.has(job.id);
+                      return (
+                        <div key={job.id} className={isActive ? "bg-blue-50" : ""}>
+                          <JobHeader
+                            job={job}
+                            expanded={expanded}
+                            onToggle={() => toggleJobExpanded(job.id)}
+                            onRetryJob={() => handleRetryJob(job.id)}
+                            isRetrying={retryingJobId === job.id}
+                          />
+                          {expanded && (
+                            <div className="divide-y bg-gray-50/50">
+                              {Object.values(job.documents).map((doc) => (
+                                <TaskRow
+                                  key={doc.id}
+                                  document={doc}
+                                  onRetry={() => handleRetryDoc(doc.id)}
+                                  onDelete={() => setDeletingDocId(doc.id)}
+                                  onMove={() => openMoveDialog(doc.id)}
+                                  isRetrying={retryingDocId === doc.id}
+                                  isMoving={movingDocId === doc.id}
+                                />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -286,21 +301,21 @@ export default function ImportTaskPanel(props: ImportTaskPanelProps) {
         </DialogBody>
 
         <ConfirmDialog
-          open={!!deletingId}
-          setOpen={() => setDeletingId(null)}
+          open={!!deletingDocId}
+          setOpen={() => setDeletingDocId(null)}
           message={t("Knowledge.Confirmation.DeleteDocument")}
-          onConfirm={() => deletingId && handleDelete(deletingId)}
+          onConfirm={() => deletingDocId && handleDeleteDoc(deletingDocId)}
         />
 
-        {showMoveDialog && movingId && (
+        {showMoveDialog && movingDocId && (
           <MoveCollectionDialog
             open={showMoveDialog}
             onOpenChange={setShowMoveDialog}
             collections={collections.rows.filter((c) => c.id !== id)}
             selectedCollectionId={moveCollectionId}
             onSelectedChange={setMoveCollectionId}
-            onConfirm={() => moveCollectionId && handleMove(movingId, moveCollectionId)}
-            isMoving={movingId === movingId}
+            onConfirm={() => moveCollectionId && handleMoveDoc(movingDocId, moveCollectionId)}
+            isMoving={!!movingDocId}
           />
         )}
       </DialogSurface>
@@ -320,17 +335,104 @@ function StatItem({ label, value, icon }: { label: string; value: number; icon: 
   );
 }
 
+function JobHeader({
+  job,
+  expanded,
+  onToggle,
+  onRetryJob,
+  isRetrying,
+}: {
+  job: ImportJob;
+  expanded: boolean;
+  onToggle: () => void;
+  onRetryJob: () => void;
+  isRetrying: boolean;
+}) {
+  const { t } = useTranslation();
+
+  const statusInfo = {
+    processing: {
+      label: t("Document.Status.Processing"),
+      color: "text-blue-600",
+      dot: "bg-blue-500",
+    },
+    completed: {
+      label: t("Document.Status.Completed"),
+      color: "text-green-600",
+      dot: "bg-green-500",
+    },
+    completed_with_errors: {
+      label: t("Knowledge.ImportTaskPanel.CompletedWithErrors", {
+        defaultValue: "Completed with errors",
+      }),
+      color: "text-orange-600",
+      dot: "bg-orange-500",
+    },
+  }[job.status];
+
+  const totalDocs = Object.keys(job.documents).length;
+
+  return (
+    <div className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 cursor-pointer" onClick={onToggle}>
+      <Button icon={expanded ? <ChevronDown /> : <ChevronRight />} appearance="subtle" size="small" />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className={`w-2 h-2 rounded-full ${statusInfo.dot}`} />
+          <span className="text-sm font-medium truncate">{job.collectionName}</span>
+          <span className="text-xs text-gray-400 flex-shrink-0">
+            {totalDocs} {t("Knowledge.ImportTaskPanel.Files", { defaultValue: "files" })}
+          </span>
+          <span className="text-xs text-gray-400 flex-shrink-0">· {formatTime(job.createTime)}</span>
+        </div>
+        <div className="flex items-center gap-3 mt-1.5">
+          <div className="flex-1 max-w-xs">
+            <ProgressBar value={job.progress} />
+          </div>
+          <span className="text-xs text-gray-500 w-12 text-right">
+            {(job.progress * 100).toFixed(0)}%
+          </span>
+          <span className={`text-xs font-medium ${statusInfo.color}`}>{statusInfo.label}</span>
+          <div className="flex items-center gap-1.5 text-xs text-gray-500">
+            <span>{job.pendingCount}P</span>
+            <span>·</span>
+            <span>{job.processingCount}R</span>
+            <span>·</span>
+            <span className="text-green-600">{job.completedCount}C</span>
+            {job.failedCount > 0 && (
+              <>
+                <span>·</span>
+                <span className="text-red-600">{job.failedCount}F</span>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+      {job.failedCount > 0 && (
+        <div className="flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+          <Button
+            appearance="primary"
+            size="small"
+            icon={<RetryIcon />}
+            onClick={onRetryJob}
+            disabled={isRetrying}
+          >
+            {t("Knowledge.ImportTaskPanel.RetryFailed", { defaultValue: "Retry Failed" })}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TaskRow({
   document,
-  processing,
   onRetry,
   onDelete,
   onMove,
   isRetrying,
   isMoving,
 }: {
-  document: LiveDocument;
-  processing?: { status: string; progress: number };
+  document: ImportJob["documents"][string];
   onRetry: () => void;
   onDelete: () => void;
   onMove: () => void;
@@ -339,8 +441,8 @@ function TaskRow({
 }) {
   const { t } = useTranslation();
 
-  const status = getTaskStatus(document, processing ? { [document.id]: processing } : {});
-  const progress = processing?.progress || 0;
+  const status = getTaskStatus(document);
+  const progress = document.progress || 0;
 
   const statusInfo = {
     pending: {
@@ -378,19 +480,17 @@ function TaskRow({
   const isProcessing = status === "extracting" || status === "embedding" || status === "saving";
 
   return (
-    <div className="flex items-center gap-3 px-4 py-3 hover:bg-gray-50">
-      <div className="flex-shrink-0">{statusInfo.icon}</div>
+    <div className="flex items-center gap-3 pl-10 pr-4 py-2.5 hover:bg-gray-100">
+      <div className="flex-shrink-0 w-6">{statusInfo.icon}</div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium truncate">{document.name}</span>
-          <span className="text-xs text-gray-400 flex-shrink-0">
-            {formatFileSize(document.size)}
-          </span>
+          <span className="text-xs text-gray-400 flex-shrink-0">{formatFileSize(document.size)}</span>
         </div>
-        <div className="flex items-center gap-2 mt-1">
+        <div className="flex items-center gap-2 mt-0.5">
           <span className={`text-xs ${statusInfo.color}`}>{statusInfo.label}</span>
           {isProcessing && (
-            <span className="text-xs text-gray-500">{(progress * 100).toFixed(1)}%</span>
+            <span className="text-xs text-gray-500">{(progress * 100).toFixed(0)}%</span>
           )}
           {document.status === "failed" && document.error && (
             <Tooltip relationship="description" content={document.error}>
@@ -399,7 +499,7 @@ function TaskRow({
           )}
         </div>
         {isProcessing && (
-          <div className="w-full max-w-xs mt-1.5">
+          <div className="w-full max-w-xs mt-1">
             <ProgressBar value={progress} />
           </div>
         )}
@@ -412,18 +512,10 @@ function TaskRow({
             </MenuTrigger>
             <MenuPopover>
               <MenuList>
-                <MenuItem
-                  icon={<RetryIcon />}
-                  onClick={onRetry}
-                  disabled={isRetrying || isMoving}
-                >
+                <MenuItem icon={<RetryIcon />} onClick={onRetry} disabled={isRetrying || isMoving}>
                   {t("Knowledge.ImportTaskPanel.Retry", { defaultValue: "Retry" })}
                 </MenuItem>
-                <MenuItem
-                  icon={<MoveIcon />}
-                  onClick={onMove}
-                  disabled={isRetrying || isMoving}
-                >
+                <MenuItem icon={<MoveIcon />} onClick={onMove} disabled={isRetrying || isMoving}>
                   {t("Knowledge.ImportTaskPanel.Move", { defaultValue: "Move to Collection" })}
                 </MenuItem>
                 <MenuItem icon={<DeleteIcon />} onClick={onDelete}>
@@ -462,9 +554,7 @@ function MoveCollectionDialog({
       <DialogSurface className="min-w-[400px]">
         <DialogBody>
           <DialogTitle>
-            {t("Knowledge.ImportTaskPanel.MoveTitle", {
-              defaultValue: "Move to Collection",
-            })}
+            {t("Knowledge.ImportTaskPanel.MoveTitle", { defaultValue: "Move to Collection" })}
           </DialogTitle>
           <DialogContent>
             <div className="flex flex-col gap-3">

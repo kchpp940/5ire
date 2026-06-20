@@ -18,6 +18,7 @@ export class DocumentManagerBridge extends Bridge.define("document-manager", () 
     preCheckImport: service.preCheckImport.bind(service),
     retryDocument: service.retryDocument.bind(service),
     moveDocumentToCollection: service.moveDocumentToCollection.bind(service),
+    retryImportJob: service.retryImportJob.bind(service),
     queryChunks: service.queryChunks.bind(service),
     associateCollection: service.associateCollection.bind(service),
     disassociateCollection: service.disassociateCollection.bind(service),
@@ -74,6 +75,9 @@ export class DocumentManagerBridge extends Bridge.define("document-manager", () 
             });
         },
       });
+    },
+    liveImportJobs: () => {
+      return service.liveImportJobs();
     },
   };
 }) {}
