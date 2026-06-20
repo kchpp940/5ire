@@ -4,10 +4,21 @@ import {
   conversation,
   document,
   documentChunk,
+  importJob,
   project,
   server,
   turn,
 } from "@/main/database/schema/tables";
+
+export const importJobRelations = relations(importJob, (helpers) => {
+  return {
+    collection: helpers.one(collection, {
+      references: [collection.id],
+      fields: [importJob.collectionId],
+    }),
+    documents: helpers.many(document),
+  };
+});
 
 /**
  * Defines the relationships between the `collection` table and other tables.
@@ -33,17 +44,15 @@ export const collectionRelations = relations(collection, (helpers) => {
  */
 export const documentRelations = relations(document, (helpers) => {
   return {
-    /**
-     * Associates with the knowledge collection it belongs to.
-     */
     collection: helpers.one(collection, {
       references: [collection.id],
       fields: [document.collectionId],
     }),
-    /**
-     * A document can contain multiple document chunks.
-     */
     chunks: helpers.many(documentChunk),
+    importJob: helpers.one(importJob, {
+      references: [importJob.id],
+      fields: [document.importJobId],
+    }),
   };
 });
 

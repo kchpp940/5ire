@@ -97,6 +97,26 @@ export const collection = pgTable("collections", collectionColumns, (table) => {
  */
 export const documentStatus = pgEnum("document_status", ["pending", "processing", "completed", "failed"]);
 
+export const importJobStatus = pgEnum("import_job_status", ["processing", "completed", "completed_with_errors"]);
+
+const importJobColumns = {
+  id: uuid().primaryKey().defaultRandom(),
+  createTime: makeCreateTime(),
+  updateTime: makeUpdateTime(),
+  collectionId: uuid("collection_id")
+    .notNull()
+    .references(() => collection.id, {
+      onDelete: "cascade",
+      onUpdate: "cascade",
+    }),
+  collectionName: varchar("collection_name", { length: 300 }).notNull(),
+  status: importJobStatus().default("processing").notNull(),
+};
+
+export const importJob = pgTable("import_jobs", importJobColumns, (table) => {
+  return [index().on(table.collectionId), index().on(table.createTime)];
+});
+
 /**
  * Schema definition for the `documents` table.
  */
@@ -148,6 +168,13 @@ const documentColumns = {
    */
   size: integer().default(0).notNull(),
   /**
+   * Associates with the import job it belongs to.
+   */
+  importJobId: uuid("import_job_id").references(() => importJob.id, {
+    onDelete: "set null",
+    onUpdate: "cascade",
+  }),
+  /**
    * The legacy ID of the document.
    */
   legacyId: varchar("legacy_id", { length: 300 }),
@@ -162,6 +189,7 @@ export const document = pgTable("documents", documentColumns, (table) => {
     index().on(table.name),
     index().on(table.createTime),
     index().on(table.url),
+    index().on(table.importJobId),
     // Duplicate documents are not allowed in knowledge collection
     uniqueIndex().on(table.collectionId, table.url),
     uniqueIndex().on(table.legacyId).where(isNotNull(table.legacyId)),

@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { and, cosineDistance, eq, inArray, type SQL } from "drizzle-orm";
+import { and, asc, cosineDistance, eq, inArray, type SQL } from "drizzle-orm";
 import { dialog } from "electron";
 import { default as memoize } from "memoizee";
 import {
@@ -20,11 +20,6 @@ import { Embedder } from "@/main/services/embedder";
 import { LegacyDataMigrator } from "@/main/services/legacy-data-migrator";
 import { Logger } from "@/main/services/logger";
 
-/**
- * DocumentManager class is used to manage document collections and documents
- * Provides functions to create, delete, update collections and import, delete documents
- * Manages ImportJob lifecycle with real-time event streaming
- */
 export class DocumentManager extends Stateful<DocumentManager.State> {
   #database = Container.inject(Database);
   #logger = Container.inject(Logger).scope("DocumentsManager");
@@ -35,17 +30,6 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
   #emitter = Emitter.create<DocumentManager.Events>();
   #listenersInitialized = false;
 
-  /**
-   * Constructor to initialize the DocumentManager instance
-   *
-   * This constructor sets up memoization for live query methods to improve performance
-   * by caching the results of identical method calls.
-   *
-   * Configuration options:
-   * - primitive: true enables primitive value comparison for cache keys
-   * - promise: true handles Promise-returning functions properly
-   * - normalizer: function to generate cache keys from method arguments
-   */
   constructor() {
     super(() => ({
       importJobs: {},
@@ -60,21 +44,72 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
       promise: true,
       normalizer: (args) => args[0],
     });
-    this.liveImportJobs = memoize(this.liveImportJobs.bind(this), {
-      primitive: true,
-    });
   }
 
-  /**
-   * Get the event emitter instance for ImportJob events
-   */
   get emitter() {
     return this.#emitter;
   }
 
-  /**
-   * Ensure DocumentEmbedder event listeners are set up
-   */
+  async init() {
+    await this.#database.ready;
+
+    this.#ensureListeners();
+    await this.#rebuildImportJobsFromDatabase();
+  }
+
+  async #rebuildImportJobsFromDatabase() {
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+
+    const allJobs = await client.select().from(schema.importJob).orderBy(asc(schema.importJob.createTime)).execute();
+
+    for (const jobRow of allJobs) {
+      const docs = await client
+        .select({
+          id: schema.document.id,
+          name: schema.document.name,
+          url: schema.document.url,
+          size: schema.document.size,
+          mimetype: schema.document.mimetype,
+          status: schema.document.status,
+          error: schema.document.error,
+        })
+        .from(schema.document)
+        .where(eq(schema.document.importJobId, jobRow.id))
+        .execute();
+
+      const documents: Record<string, DocumentManager.ImportJobDocument> = {};
+      for (const d of docs) {
+        documents[d.id] = {
+          id: d.id,
+          name: d.name,
+          url: d.url,
+          size: d.size,
+          mimetype: d.mimetype,
+          status: d.status as DocumentManager.ImportJobDocumentStatus,
+          stage: d.status === "processing" ? "extracting" : null,
+          progress: d.status === "completed" ? 1 : 0,
+          error: d.error,
+        };
+      }
+
+      const job: DocumentManager.ImportJob = {
+        id: jobRow.id,
+        collectionId: jobRow.collectionId,
+        collectionName: jobRow.collectionName,
+        createTime: jobRow.createTime,
+        updateTime: jobRow.updateTime,
+        status: jobRow.status as DocumentManager.ImportJobStatus,
+        documents,
+        ...this.#calcJobStatsFromDocs(documents),
+      };
+
+      this.update((draft) => {
+        draft.importJobs[jobRow.id] = job;
+      });
+    }
+  }
+
   #ensureListeners() {
     if (this.#listenersInitialized) {
       return;
@@ -126,132 +161,79 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
     });
   }
 
-  /**
-   * Update a document's state across all import jobs that contain it
-   */
   #updateDocumentInJobs(documentId: string, updater: (doc: DocumentManager.ImportJobDocument) => void) {
     this.update((draft) => {
       for (const job of Object.values(draft.importJobs)) {
         const doc = job.documents[documentId];
         if (doc) {
           updater(doc);
-          const stats = this.#calcJobStats(job);
-          job.pendingCount = stats.pending;
-          job.processingCount = stats.processing;
-          job.completedCount = stats.completed;
-          job.failedCount = stats.failed;
+          const stats = this.#calcJobStatsFromDocs(job.documents);
+          job.pendingCount = stats.pendingCount;
+          job.processingCount = stats.processingCount;
+          job.completedCount = stats.completedCount;
+          job.failedCount = stats.failedCount;
           job.progress = stats.progress;
-          if (stats.completed + stats.failed === Object.keys(job.documents).length) {
-            job.status = stats.failed > 0 ? "completed_with_errors" : "completed";
+          const total = Object.keys(job.documents).length;
+          if (stats.completedCount + stats.failedCount === total) {
+            const newStatus = stats.failedCount > 0 ? "completed_with_errors" : "completed";
+            job.status = newStatus;
+            this.#syncJobStatusToDatabase(job.id, newStatus);
           }
+          job.updateTime = new Date();
         }
       }
     });
   }
 
-  /**
-   * Calculate job statistics from documents
-   */
-  #calcJobStats(job: DocumentManager.ImportJob) {
-    let pending = 0;
-    let processing = 0;
-    let completed = 0;
-    let failed = 0;
+  async #syncJobStatusToDatabase(jobId: string, status: DocumentManager.ImportJobStatus) {
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+    await client
+      .update(schema.importJob)
+      .set({ status })
+      .where(eq(schema.importJob.id, jobId))
+      .execute()
+      .catch((err) => {
+        this.#logger.scope("SyncJobStatus").error("Failed to sync job status:", err);
+      });
+  }
+
+  #calcJobStatsFromDocs(documents: Record<string, DocumentManager.ImportJobDocument>) {
+    let pendingCount = 0;
+    let processingCount = 0;
+    let completedCount = 0;
+    let failedCount = 0;
     let totalProgress = 0;
-    const docs = Object.values(job.documents);
+    const docs = Object.values(documents);
     for (const doc of docs) {
       switch (doc.status) {
         case "pending":
-          pending++;
+          pendingCount++;
           break;
         case "processing":
-          processing++;
+          processingCount++;
           totalProgress += doc.progress / 3;
           if (doc.stage === "embedding") totalProgress += 1 / 3;
           if (doc.stage === "saving") totalProgress += 2 / 3;
           break;
         case "completed":
-          completed++;
+          completedCount++;
           totalProgress += 1;
           break;
         case "failed":
-          failed++;
+          failedCount++;
           totalProgress += 1;
           break;
       }
     }
     const progress = docs.length > 0 ? totalProgress / docs.length : 0;
-    return { pending, processing, completed, failed, progress };
+    return { pendingCount, processingCount, completedCount, failedCount, progress };
   }
 
-  /**
-   * Create a new import job
-   * @returns The created import job
-   */
-  createImportJob(options: DocumentManager.CreateImportJobOptions): DocumentManager.ImportJob {
-    this.#ensureListeners();
-
-    const jobId = crypto.randomUUID();
-    const now = new Date();
-
-    const documents: Record<string, DocumentManager.ImportJobDocument> = {};
-    for (const file of options.files) {
-      documents[file.id] = {
-        id: file.id,
-        name: file.name,
-        url: file.url,
-        size: file.size,
-        mimetype: file.mimetype,
-        status: "pending",
-        stage: null,
-        progress: 0,
-        error: null,
-      };
-    }
-
-    const job: DocumentManager.ImportJob = {
-      id: jobId,
-      collectionId: options.collectionId,
-      collectionName: options.collectionName,
-      createTime: now,
-      updateTime: now,
-      status: "processing",
-      documents,
-      pendingCount: options.files.length,
-      processingCount: 0,
-      completedCount: 0,
-      failedCount: 0,
-      progress: 0,
-    };
-
-    this.update((draft) => {
-      draft.importJobs[jobId] = job;
-    });
-
-    this.#emitter.emit("import-job-created", { jobId });
-
-    return job;
-  }
-
-  /**
-   * Get an import job by ID
-   */
-  getImportJob(jobId: string): DocumentManager.ImportJob | undefined {
-    return this.state.importJobs[jobId];
-  }
-
-  /**
-   * List all active import jobs (not archived)
-   */
   listImportJobs(): DocumentManager.ImportJob[] {
-    return Object.values(this.state.importJobs).sort(
-      (a, b) => b.createTime.getTime() - a.createTime.getTime(),
-    );
+    return Object.values(this.state.importJobs).sort((a, b) => b.createTime.getTime() - a.createTime.getTime());
   }
 
-  /**
-   * Retry all failed documents in an import job
-   */
   async retryImportJob(jobId: string) {
     const job = this.state.importJobs[jobId];
     if (!job) {
@@ -275,21 +257,20 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
             d.error = null;
           }
         }
-        const stats = this.#calcJobStats(j);
-        j.pendingCount = stats.pending;
-        j.processingCount = stats.processing;
-        j.completedCount = stats.completed;
-        j.failedCount = stats.failed;
+        const stats = this.#calcJobStatsFromDocs(j.documents);
+        j.pendingCount = stats.pendingCount;
+        j.processingCount = stats.processingCount;
+        j.completedCount = stats.completedCount;
+        j.failedCount = stats.failedCount;
         j.progress = stats.progress;
         j.status = "processing";
         j.updateTime = new Date();
       }
     });
+
+    await this.#syncJobStatusToDatabase(jobId, "processing");
   }
 
-  /**
-   * Listen to import job changes in real-time
-   */
   liveImportJobs() {
     this.#ensureListeners();
     const abort = new AbortController();
@@ -489,9 +470,7 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
       return;
     }
 
-    return result.filePaths.map((path) =>
-      pathToFileURL(path, { windows: process.platform === "win32" }).toString(),
-    );
+    return result.filePaths.map((path) => pathToFileURL(path, { windows: process.platform === "win32" }).toString());
   }
 
   async importDocumentsFromFileSystem(options: DocumentManager.ImportDocumentsFromFileSystemOptions) {
@@ -517,7 +496,7 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
     const client = this.#database.client;
     const schema = this.#database.schema;
 
-    return client.transaction(async (tx) => {
+    await client.transaction(async (tx) => {
       const exists = await tx.$count(schema.document, eq(schema.document.id, options.id)).then((count) => count > 0);
 
       if (!exists) {
@@ -525,6 +504,27 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
       }
 
       return tx.delete(schema.document).where(eq(schema.document.id, options.id)).execute();
+    });
+
+    this.update((draft) => {
+      for (const job of Object.values(draft.importJobs)) {
+        if (job.documents[options.id]) {
+          delete job.documents[options.id];
+          const stats = this.#calcJobStatsFromDocs(job.documents);
+          job.pendingCount = stats.pendingCount;
+          job.processingCount = stats.processingCount;
+          job.completedCount = stats.completedCount;
+          job.failedCount = stats.failedCount;
+          job.progress = stats.progress;
+          const total = Object.keys(job.documents).length;
+          if (total === 0 || stats.completedCount + stats.failedCount === total) {
+            const newStatus = stats.failedCount > 0 ? "completed_with_errors" : "completed";
+            job.status = newStatus;
+            this.#syncJobStatusToDatabase(job.id, newStatus);
+          }
+          job.updateTime = new Date();
+        }
+      }
     });
   }
 
@@ -964,9 +964,7 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
     logger.info(`Retrying document "${options.id}"`);
 
     return client.transaction(async (tx) => {
-      const exists = await tx
-        .$count(schema.document, eq(schema.document.id, options.id))
-        .then((count) => count > 0);
+      const exists = await tx.$count(schema.document, eq(schema.document.id, options.id)).then((count) => count > 0);
 
       if (!exists) {
         throw new Error("Document does not exist.");
@@ -1020,10 +1018,7 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
       const duplicate = await tx
         .$count(
           schema.document,
-          and(
-            eq(schema.document.url, document.url),
-            eq(schema.document.collectionId, options.collectionId),
-          ),
+          and(eq(schema.document.url, document.url), eq(schema.document.collectionId, options.collectionId)),
         )
         .then((count) => count > 0);
 
@@ -1062,7 +1057,7 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
     const client = this.#database.client;
     const schema = this.#database.schema;
 
-    const insertedDocs = await client.transaction(async (tx) => {
+    const [jobRow, insertedDocs] = await client.transaction(async (tx) => {
       const exists = await tx
         .$count(schema.collection, eq(schema.collection.id, options.collection))
         .then((count) => count > 0);
@@ -1086,6 +1081,16 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
         }
       }
 
+      const [createdJob] = await tx
+        .insert(schema.importJob)
+        .values({
+          collectionId: options.collection,
+          collectionName: options.collectionName,
+          status: "processing",
+        })
+        .returning()
+        .execute();
+
       const values = stringifiedUrls.map((url) => {
         let name = url;
         if (url.startsWith("file://")) {
@@ -1100,27 +1105,58 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
           mimetype: preCheckFile?.mimetype || "unknown",
           size: preCheckFile?.size || 0,
           error: null,
+          importJobId: createdJob.id,
         };
       });
 
-      return tx
+      const docs = await tx
         .insert(schema.document)
         .values(values)
-        .returning({ id: schema.document.id, name: schema.document.name, url: schema.document.url, size: schema.document.size, mimetype: schema.document.mimetype })
+        .returning({
+          id: schema.document.id,
+          name: schema.document.name,
+          url: schema.document.url,
+          size: schema.document.size,
+          mimetype: schema.document.mimetype,
+        })
         .execute();
+
+      return [createdJob, docs] as const;
     });
 
-    const job = this.createImportJob({
-      collectionId: options.collection,
-      collectionName: options.collectionName,
-      files: insertedDocs.map((d) => ({
+    this.#ensureListeners();
+
+    const documents: Record<string, DocumentManager.ImportJobDocument> = {};
+    for (const d of insertedDocs) {
+      documents[d.id] = {
         id: d.id,
         name: d.name,
         url: d.url,
         size: d.size,
         mimetype: d.mimetype,
-      })),
+        status: "pending",
+        stage: null,
+        progress: 0,
+        error: null,
+      };
+    }
+
+    const job: DocumentManager.ImportJob = {
+      id: jobRow.id,
+      collectionId: jobRow.collectionId,
+      collectionName: jobRow.collectionName,
+      createTime: jobRow.createTime,
+      updateTime: jobRow.updateTime,
+      status: "processing",
+      documents,
+      ...this.#calcJobStatsFromDocs(documents),
+    };
+
+    this.update((draft) => {
+      draft.importJobs[jobRow.id] = job;
     });
+
+    this.#emitter.emit("import-job-created", { jobId: jobRow.id });
 
     return job;
   }
@@ -1607,33 +1643,6 @@ export namespace DocumentManager {
     progress: number;
   };
 
-  /**
-   * Options for creating a new import job
-   */
-  export type CreateImportJobOptions = {
-    /**
-     * Target collection ID
-     */
-    collectionId: string;
-    /**
-     * Target collection name
-     */
-    collectionName: string;
-    /**
-     * Files to include in the import job
-     */
-    files: {
-      id: string;
-      name: string;
-      url: string;
-      size: number;
-      mimetype: string;
-    }[];
-  };
-
-  /**
-   * DocumentManager state managed by Stateful
-   */
   export type State = {
     /**
      * Map of import job IDs to their current state
