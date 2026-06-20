@@ -12,6 +12,7 @@ import {
 } from "@/main/constants";
 import { Database } from "@/main/database";
 import { Container } from "@/main/internal/container";
+import { DocumentExtractor } from "@/main/services/document-extractor";
 import { Embedder } from "@/main/services/embedder";
 import { LegacyDataMigrator } from "@/main/services/legacy-data-migrator";
 import { Logger } from "@/main/services/logger";
@@ -24,6 +25,7 @@ export class DocumentManager {
   #database = Container.inject(Database);
   #logger = Container.inject(Logger).scope("DocumentsManager");
   #embedder = Container.inject(Embedder);
+  #extractor = Container.inject(DocumentExtractor);
   #legacyDataMigrator = Container.inject(LegacyDataMigrator);
 
   /**
@@ -204,7 +206,11 @@ export class DocumentManager {
     });
   }
 
-  async importDocumentsFromFileSystem(options: DocumentManager.ImportDocumentsFromFileSystemOptions) {
+  /**
+   * Select files from file system dialog
+   * @returns Promise<string[] | undefined> Selected file URLs or undefined if canceled
+   */
+  async selectFilesFromFileSystem() {
     const extensions = [
       ...Object.keys(COMMON_TEXTUAL_FILE_MIMETYPES),
       ...Object.keys(COMMON_BINARY_DOCUMENT_FILE_MIMETYPES),
@@ -224,23 +230,21 @@ export class DocumentManager {
       return;
     }
 
-    for (const path of result.filePaths) {
-      const extension = path.split(".").pop()?.toLowerCase();
+    return result.filePaths.map((path) =>
+      pathToFileURL(path, { windows: process.platform === "win32" }).toString(),
+    );
+  }
 
-      if (!extension || !extensions.includes(extension)) {
-        throw new Error(`Unsupported file type for ${path}`);
-      }
+  async importDocumentsFromFileSystem(options: DocumentManager.ImportDocumentsFromFileSystemOptions) {
+    const urls = await this.selectFilesFromFileSystem();
 
-      await stat(path).then((stats) => {
-        if (stats.size > MAX_DOCUMENT_SIZE) {
-          throw new Error(`File ${path} is too large. Maximum size is ${MAX_DOCUMENT_SIZE / (1024 * 1024)} MB.`);
-        }
-      });
+    if (!urls || urls.length === 0) {
+      return;
     }
 
     return this.importDocuments({
       collection: options.collection,
-      urls: result.filePaths.map((path) => pathToFileURL(path, { windows: process.platform === "win32" }).toString()),
+      urls,
     });
   }
 
@@ -561,6 +565,245 @@ export class DocumentManager {
   }
 
   /**
+   * Pre-check files before importing
+   * Validates file types, sizes, checks for duplicates, and estimates chunk counts
+   * @param options Options containing collection ID and file URLs
+   * @returns Promise<DocumentManager.PreCheckResult> Pre-check results
+   */
+  async preCheckImport(options: DocumentManager.PreCheckImportOptions) {
+    const logger = this.#logger.scope("PreCheckImport");
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+
+    logger.info(`Pre-checking ${options.urls.length} files for collection "${options.collection}"`);
+
+    const results: DocumentManager.FilePreCheckResult[] = [];
+    let totalEstimatedChunks = 0;
+    let validCount = 0;
+    let duplicateCount = 0;
+    let errorCount = 0;
+
+    const embedderReady = this.#embedder.state.status.type === "ready";
+
+    for (const url of options.urls) {
+      const result: DocumentManager.FilePreCheckResult = {
+        url,
+        name: url,
+        status: "valid",
+        size: 0,
+        mimetype: "unknown",
+        estimatedChunks: 0,
+        error: null,
+      };
+
+      try {
+        const parsedUrl = new URL(url);
+
+        if (!SUPPORTED_DOCUMENT_URL_SCHEMAS.includes(parsedUrl.protocol.slice(0, -1))) {
+          result.status = "error";
+          result.error = `Unsupported URL schema: ${parsedUrl.protocol}`;
+          errorCount++;
+          results.push(result);
+          continue;
+        }
+
+        if (url.startsWith("file://")) {
+          const path = fileURLToPath(url);
+          result.name = basename(path);
+
+          const stats = await stat(path).catch(() => null);
+          if (!stats) {
+            result.status = "error";
+            result.error = "File not found";
+            errorCount++;
+            results.push(result);
+            continue;
+          }
+
+          if (!stats.isFile()) {
+            result.status = "error";
+            result.error = "Not a file";
+            errorCount++;
+            results.push(result);
+            continue;
+          }
+
+          result.size = stats.size;
+
+          if (stats.size > MAX_DOCUMENT_SIZE) {
+            result.status = "error";
+            result.error = `File too large (max ${MAX_DOCUMENT_SIZE / (1024 * 1024)} MB)`;
+            errorCount++;
+            results.push(result);
+            continue;
+          }
+
+          const ext = path.split(".").pop()?.toLowerCase();
+          if (ext) {
+            if (ext in COMMON_TEXTUAL_FILE_MIMETYPES) {
+              result.mimetype = COMMON_TEXTUAL_FILE_MIMETYPES[ext as keyof typeof COMMON_TEXTUAL_FILE_MIMETYPES];
+            } else if (ext in COMMON_BINARY_DOCUMENT_FILE_MIMETYPES) {
+              result.mimetype =
+                COMMON_BINARY_DOCUMENT_FILE_MIMETYPES[ext as keyof typeof COMMON_BINARY_DOCUMENT_FILE_MIMETYPES];
+            } else {
+              result.status = "error";
+              result.error = "Unsupported file type";
+              errorCount++;
+              results.push(result);
+              continue;
+            }
+          }
+
+          const estimatedChunks = Math.max(1, Math.ceil(stats.size / 1500));
+          result.estimatedChunks = estimatedChunks;
+          totalEstimatedChunks += estimatedChunks;
+        }
+
+        const exists = await client
+          .$count(
+            schema.document,
+            and(eq(schema.document.url, url), eq(schema.document.collectionId, options.collection)),
+          )
+          .then((count) => count > 0);
+
+        if (exists) {
+          result.status = "duplicate";
+          duplicateCount++;
+        } else {
+          validCount++;
+        }
+      } catch (e) {
+        result.status = "error";
+        result.error = e instanceof Error ? e.message : "Unknown error";
+        errorCount++;
+      }
+
+      results.push(result);
+    }
+
+    return {
+      files: results,
+      totalFiles: results.length,
+      validCount,
+      duplicateCount,
+      errorCount,
+      totalEstimatedChunks,
+      embedderReady,
+    } satisfies DocumentManager.PreCheckResult;
+  }
+
+  /**
+   * Retry a failed document by resetting its status to pending
+   * @param options Options containing the document ID
+   * @returns Promise<void>
+   */
+  async retryDocument(options: DocumentManager.RetryDocumentOptions) {
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+    const logger = this.#logger.scope("RetryDocument");
+
+    logger.info(`Retrying document "${options.id}"`);
+
+    return client.transaction(async (tx) => {
+      const exists = await tx
+        .$count(schema.document, eq(schema.document.id, options.id))
+        .then((count) => count > 0);
+
+      if (!exists) {
+        throw new Error("Document does not exist.");
+      }
+
+      await tx
+        .update(schema.document)
+        .set({
+          status: "pending",
+          error: null,
+        })
+        .where(eq(schema.document.id, options.id))
+        .execute();
+    });
+  }
+
+  /**
+   * Move a document to a different collection
+   * @param options Options containing document ID and target collection ID
+   * @returns Promise<void>
+   */
+  async moveDocumentToCollection(options: DocumentManager.MoveDocumentToCollectionOptions) {
+    const client = this.#database.client;
+    const schema = this.#database.schema;
+    const logger = this.#logger.scope("MoveDocumentToCollection");
+
+    logger.info(`Moving document "${options.documentId}" to collection "${options.collectionId}"`);
+
+    return client.transaction(async (tx) => {
+      const document = await tx
+        .select({
+          id: schema.document.id,
+          url: schema.document.url,
+        })
+        .from(schema.document)
+        .where(eq(schema.document.id, options.documentId))
+        .then((result) => result[0]);
+
+      if (!document) {
+        throw new Error("Document does not exist.");
+      }
+
+      const targetCollection = await tx
+        .$count(schema.collection, eq(schema.collection.id, options.collectionId))
+        .then((count) => count > 0);
+
+      if (!targetCollection) {
+        throw new Error("Target collection does not exist.");
+      }
+
+      const duplicate = await tx
+        .$count(
+          schema.document,
+          and(
+            eq(schema.document.url, document.url),
+            eq(schema.document.collectionId, options.collectionId),
+          ),
+        )
+        .then((count) => count > 0);
+
+      if (duplicate) {
+        throw new Error("Document already exists in target collection.");
+      }
+
+      await tx
+        .update(schema.document)
+        .set({
+          collectionId: options.collectionId,
+          status: "pending",
+          error: null,
+        })
+        .where(eq(schema.document.id, options.documentId))
+        .execute();
+    });
+  }
+
+  /**
+   * Import documents with pre-checked results
+   * Only imports valid (non-duplicate, non-error) files
+   * @param options Options containing collection ID and pre-check results
+   * @returns Promise<void>
+   */
+  async importDocumentsWithPreCheck(options: DocumentManager.ImportDocumentsWithPreCheckOptions) {
+    const validUrls = options.files.filter((f) => f.status === "valid").map((f) => f.url);
+
+    if (validUrls.length === 0) {
+      throw new Error("No valid files to import.");
+    }
+
+    return this.importDocuments({
+      collection: options.collection,
+      urls: validUrls,
+    });
+  }
+
+  /**
    * Query document chunks based on given options
    *
    * This method uses embedding vector technology to search for document chunks based on semantic similarity.
@@ -800,5 +1043,130 @@ export namespace DocumentManager {
      * The text to search for
      */
     text: string;
+  };
+
+  /**
+   * Pre-check import options
+   */
+  export type PreCheckImportOptions = {
+    /**
+     * Target collection ID
+     */
+    collection: string;
+    /**
+     * Document URL list to pre-check
+     */
+    urls: string[];
+  };
+
+  /**
+   * File pre-check status
+   */
+  export type FilePreCheckStatus = "valid" | "duplicate" | "error";
+
+  /**
+   * Single file pre-check result
+   */
+  export type FilePreCheckResult = {
+    /**
+     * File URL
+     */
+    url: string;
+    /**
+     * File name
+     */
+    name: string;
+    /**
+     * Pre-check status
+     */
+    status: FilePreCheckStatus;
+    /**
+     * File size in bytes
+     */
+    size: number;
+    /**
+     * MIME type
+     */
+    mimetype: string;
+    /**
+     * Estimated number of chunks
+     */
+    estimatedChunks: number;
+    /**
+     * Error message (only present when status is "error")
+     */
+    error: string | null;
+  };
+
+  /**
+   * Pre-check result summary
+   */
+  export type PreCheckResult = {
+    /**
+     * List of all file pre-check results
+     */
+    files: FilePreCheckResult[];
+    /**
+     * Total number of files
+     */
+    totalFiles: number;
+    /**
+     * Number of valid files
+     */
+    validCount: number;
+    /**
+     * Number of duplicate files
+     */
+    duplicateCount: number;
+    /**
+     * Number of files with errors
+     */
+    errorCount: number;
+    /**
+     * Total estimated chunks
+     */
+    totalEstimatedChunks: number;
+    /**
+     * Whether the embedder is ready
+     */
+    embedderReady: boolean;
+  };
+
+  /**
+   * Retry document options
+   */
+  export type RetryDocumentOptions = {
+    /**
+     * Document ID
+     */
+    id: string;
+  };
+
+  /**
+   * Move document to collection options
+   */
+  export type MoveDocumentToCollectionOptions = {
+    /**
+     * Document ID
+     */
+    documentId: string;
+    /**
+     * Target collection ID
+     */
+    collectionId: string;
+  };
+
+  /**
+   * Import documents with pre-check results options
+   */
+  export type ImportDocumentsWithPreCheckOptions = {
+    /**
+     * Target collection ID
+     */
+    collection: string;
+    /**
+     * Pre-checked file results
+     */
+    files: FilePreCheckResult[];
   };
 }
