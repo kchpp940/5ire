@@ -7,7 +7,10 @@ import type {
   documentChunk,
   project,
   prompt,
+  promptDraft,
   promptMergeStrategy,
+  promptStatus,
+  promptVersion,
   provider,
   providerKind,
   server,
@@ -39,6 +42,15 @@ export type Prompt = InferSelectModel<typeof prompt>;
 export type PromptRaw = InferSelectModel<typeof prompt, { dbColumnNames: true }>;
 export type PromptInsert = InferInsertModel<typeof prompt>;
 export type PromptMergeStrategy = InferEnum<typeof promptMergeStrategy>;
+export type PromptStatus = InferEnum<typeof promptStatus>;
+
+export type PromptVersion = InferSelectModel<typeof promptVersion>;
+export type PromptVersionRaw = InferSelectModel<typeof promptVersion, { dbColumnNames: true }>;
+export type PromptVersionInsert = InferInsertModel<typeof promptVersion>;
+
+export type PromptDraft = InferSelectModel<typeof promptDraft>;
+export type PromptDraftRaw = InferSelectModel<typeof promptDraft, { dbColumnNames: true }>;
+export type PromptDraftInsert = InferInsertModel<typeof promptDraft>;
 
 export type ProjectConfig = {
   defaultConversationConfig?: Partial<ConversationConfig>;

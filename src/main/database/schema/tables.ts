@@ -12,6 +12,7 @@ import {
   varchar,
   vector,
 } from "drizzle-orm/pg-core";
+import type { IPromptVariableSchema } from "@/intellichat/types";
 import type {
   ConversationConfig,
   ProjectConfig,
@@ -97,26 +98,6 @@ export const collection = pgTable("collections", collectionColumns, (table) => {
  */
 export const documentStatus = pgEnum("document_status", ["pending", "processing", "completed", "failed"]);
 
-export const importJobStatus = pgEnum("import_job_status", ["processing", "completed", "completed_with_errors"]);
-
-const importJobColumns = {
-  id: uuid().primaryKey().defaultRandom(),
-  createTime: makeCreateTime(),
-  updateTime: makeUpdateTime(),
-  collectionId: uuid("collection_id")
-    .notNull()
-    .references(() => collection.id, {
-      onDelete: "cascade",
-      onUpdate: "cascade",
-    }),
-  collectionName: varchar("collection_name", { length: 300 }).notNull(),
-  status: importJobStatus().default("processing").notNull(),
-};
-
-export const importJob = pgTable("import_jobs", importJobColumns, (table) => {
-  return [index().on(table.collectionId), index().on(table.createTime)];
-});
-
 /**
  * Schema definition for the `documents` table.
  */
@@ -168,13 +149,6 @@ const documentColumns = {
    */
   size: integer().default(0).notNull(),
   /**
-   * Associates with the import job it belongs to.
-   */
-  importJobId: uuid("import_job_id").references(() => importJob.id, {
-    onDelete: "set null",
-    onUpdate: "cascade",
-  }),
-  /**
    * The legacy ID of the document.
    */
   legacyId: varchar("legacy_id", { length: 300 }),
@@ -189,7 +163,6 @@ export const document = pgTable("documents", documentColumns, (table) => {
     index().on(table.name),
     index().on(table.createTime),
     index().on(table.url),
-    index().on(table.importJobId),
     // Duplicate documents are not allowed in knowledge collection
     uniqueIndex().on(table.collectionId, table.url),
     uniqueIndex().on(table.legacyId).where(isNotNull(table.legacyId)),
@@ -303,6 +276,7 @@ export const conversationCollection = pgTable("conversation_collections", conver
  * - `scoped`: Applies the role definition only within a specific scope or context.
  */
 export const promptMergeStrategy = pgEnum("prompt_merge_strategy", ["merge", "replace", "scoped"]);
+export const promptStatus = pgEnum("prompt_status", ["draft", "published"]);
 
 const promptColumns = {
   /**
@@ -333,6 +307,50 @@ const promptColumns = {
    * System prompt merging strategy, used to specify how to use roleDefinition in conversations; when roleDefinition is empty, mergeStrategy is invalid
    */
   mergeStrategy: promptMergeStrategy().notNull().default("merge"),
+  /**
+   * Current version number
+   */
+  currentVersion: integer("current_version").default(1),
+  /**
+   * Status of the prompt
+   */
+  status: promptStatus().default("published"),
+  /**
+   * Parsed variable names from role definition template
+   */
+  roleDefinitionVariables: jsonb("role_definition_variables").$type<string[]>(),
+  /**
+   * Parsed variable names from instruction template
+   */
+  instructionTemplateVariables: jsonb("instruction_template_variables").$type<string[]>(),
+  /**
+   * Variable schemas for role definition template
+   */
+  roleDefinitionVariableSchemas: jsonb("role_definition_variable_schemas").$type<IPromptVariableSchema[]>(),
+  /**
+   * Variable schemas for instruction template
+   */
+  instructionTemplateVariableSchemas: jsonb("instruction_template_variable_schemas").$type<IPromptVariableSchema[]>(),
+  /**
+   * Max tokens for model generation
+   */
+  maxTokens: integer("max_tokens"),
+  /**
+   * Temperature for model generation
+   */
+  temperature: integer(),
+  /**
+   * Applicable model IDs
+   */
+  models: jsonb().$type<string[]>(),
+  /**
+   * Pinned timestamp
+   */
+  pinedTime: timestamp("pined_time"),
+  /**
+   * Provider for the prompt
+   */
+  provider: varchar(),
 };
 
 /**
@@ -340,6 +358,146 @@ const promptColumns = {
  */
 export const prompt = pgTable("prompts", promptColumns, (table) => {
   return [index().on(table.createTime), index().on(table.name)];
+});
+
+const promptVersionColumns = {
+  /**
+   * The unique identifier for the record.
+   */
+  id: uuid().primaryKey().defaultRandom(),
+  /**
+   * The creation time of the record.
+   */
+  createTime: makeCreateTime(),
+  /**
+   * The last update time of the record.
+   */
+  updateTime: makeUpdateTime(),
+  /**
+   * Reference to the prompt
+   */
+  promptId: uuid("prompt_id")
+    .notNull()
+    .references(() => prompt.id, { onDelete: "cascade", onUpdate: "cascade" }),
+  /**
+   * Version number
+   */
+  version: integer().notNull(),
+  /**
+   * Name of the prompt at this version
+   */
+  name: varchar({ length: 300 }).notNull(),
+  /**
+   * Role definition template at this version
+   */
+  roleDefinitionTemplate: varchar("role_definition_template"),
+  /**
+   * Instruction template at this version
+   */
+  instructionTemplate: varchar("instruction_template").notNull(),
+  /**
+   * Variable schemas for role definition
+   */
+  roleDefinitionVariableSchemas: jsonb("role_definition_variable_schemas").$type<IPromptVariableSchema[]>(),
+  /**
+   * Variable schemas for instruction template
+   */
+  instructionTemplateVariableSchemas: jsonb("instruction_template_variable_schemas").$type<IPromptVariableSchema[]>(),
+  /**
+   * Max tokens for model generation
+   */
+  maxTokens: integer("max_tokens"),
+  /**
+   * Temperature for model generation
+   */
+  temperature: integer(),
+  /**
+   * Applicable model IDs
+   */
+  models: jsonb().$type<string[]>(),
+  /**
+   * Changelog for this version
+   */
+  changelog: varchar(),
+  /**
+   * Publish timestamp
+   */
+  publishedAt: timestamp("published_at").notNull(),
+};
+
+/**
+ * The `prompt_versions` table stores historical versions of prompts.
+ */
+export const promptVersion = pgTable("prompt_versions", promptVersionColumns, (table) => {
+  return [
+    index().on(table.promptId),
+    index().on(table.version),
+    uniqueIndex().on(table.promptId, table.version),
+  ];
+});
+
+const promptDraftColumns = {
+  /**
+   * The unique identifier for the record.
+   */
+  id: uuid().primaryKey().defaultRandom(),
+  /**
+   * The creation time of the record.
+   */
+  createTime: makeCreateTime(),
+  /**
+   * The last update time of the record.
+   */
+  updateTime: makeUpdateTime(),
+  /**
+   * Reference to the prompt (one-to-one)
+   */
+  promptId: uuid("prompt_id")
+    .notNull()
+    .references(() => prompt.id, { onDelete: "cascade", onUpdate: "cascade" }),
+  /**
+   * Name of the prompt in draft
+   */
+  name: varchar({ length: 300 }).notNull(),
+  /**
+   * Role definition template in draft
+   */
+  roleDefinitionTemplate: varchar("role_definition_template"),
+  /**
+   * Instruction template in draft
+   */
+  instructionTemplate: varchar("instruction_template").notNull(),
+  /**
+   * Variable schemas for role definition
+   */
+  roleDefinitionVariableSchemas: jsonb("role_definition_variable_schemas").$type<IPromptVariableSchema[]>(),
+  /**
+   * Variable schemas for instruction template
+   */
+  instructionTemplateVariableSchemas: jsonb("instruction_template_variable_schemas").$type<IPromptVariableSchema[]>(),
+  /**
+   * Max tokens for model generation
+   */
+  maxTokens: integer("max_tokens"),
+  /**
+   * Temperature for model generation
+   */
+  temperature: integer(),
+  /**
+   * Applicable model IDs
+   */
+  models: jsonb().$type<string[]>(),
+  /**
+   * Save timestamp
+   */
+  savedAt: timestamp("saved_at").notNull(),
+};
+
+/**
+ * The `prompt_drafts` table stores draft versions of prompts.
+ */
+export const promptDraft = pgTable("prompt_drafts", promptDraftColumns, (table) => {
+  return [uniqueIndex().on(table.promptId)];
 });
 
 const projectColumns = {

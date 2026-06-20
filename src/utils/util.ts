@@ -118,7 +118,6 @@ export function parseVariables(text: string): string[] {
     if (variable !== "" && !variables.includes(variable)) {
       variables.push(variable);
     }
-    variables.push();
     m = regex.exec(text);
   }
   return variables;

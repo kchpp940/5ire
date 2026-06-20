@@ -2,6 +2,44 @@ import { IChatModelConfig, IChatProviderConfig } from 'providers/types';
 import { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
 import { FinalContentBlock } from './mcp/ContentBlockConverter';
 
+export type PromptStatus = 'draft' | 'published';
+
+export interface IPromptVariableSchema {
+  name: string;
+  description?: string;
+  defaultValue?: string;
+  required?: boolean;
+}
+
+export interface IPromptVersion {
+  id: string;
+  promptId: string;
+  version: number;
+  name: string;
+  systemMessage: string;
+  userMessage: string;
+  systemVariableSchemas?: IPromptVariableSchema[];
+  userVariableSchemas?: IPromptVariableSchema[];
+  maxTokens?: number;
+  temperature?: number;
+  models?: string[] | null;
+  changelog?: string;
+  publishedAt: number;
+}
+
+export interface IPromptDraft {
+  promptId: string;
+  name: string;
+  systemMessage: string;
+  userMessage: string;
+  systemVariableSchemas?: IPromptVariableSchema[];
+  userVariableSchemas?: IPromptVariableSchema[];
+  maxTokens?: number;
+  temperature?: number;
+  models?: string[] | null;
+  savedAt: number;
+}
+
 export interface IPrompt {
   id: string;
   name: string;
@@ -9,6 +47,7 @@ export interface IPrompt {
   userMessage: string;
   maxTokens?: number;
   temperature?: number;
+  version?: number;
 }
 
 export interface IChat {
@@ -237,11 +276,18 @@ export interface IPromptDef {
   temperature?: number;
   systemVariables?: string[];
   userVariables?: string[];
+  systemVariableSchemas?: IPromptVariableSchema[];
+  userVariableSchemas?: IPromptVariableSchema[];
   models?: string[] | null;
+  currentVersion?: number;
+  status?: PromptStatus;
+  mergeStrategy?: "merge" | "replace" | "scoped";
+  versions?: IPromptVersion[];
+  draft?: IPromptDraft | null;
   createdAt: number;
   updatedAt: number;
   pinedAt: number | null;
-  provider: string | null; // mcp server key or null(built-in)
+  provider: string | null;
 }
 
 export interface IStage {

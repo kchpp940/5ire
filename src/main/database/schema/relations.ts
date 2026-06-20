@@ -4,21 +4,13 @@ import {
   conversation,
   document,
   documentChunk,
-  importJob,
   project,
+  prompt,
+  promptDraft,
+  promptVersion,
   server,
   turn,
 } from "@/main/database/schema/tables";
-
-export const importJobRelations = relations(importJob, (helpers) => {
-  return {
-    collection: helpers.one(collection, {
-      references: [collection.id],
-      fields: [importJob.collectionId],
-    }),
-    documents: helpers.many(document),
-  };
-});
 
 /**
  * Defines the relationships between the `collection` table and other tables.
@@ -44,15 +36,17 @@ export const collectionRelations = relations(collection, (helpers) => {
  */
 export const documentRelations = relations(document, (helpers) => {
   return {
+    /**
+     * Associates with the knowledge collection it belongs to.
+     */
     collection: helpers.one(collection, {
       references: [collection.id],
       fields: [document.collectionId],
     }),
+    /**
+     * A document can contain multiple document chunks.
+     */
     chunks: helpers.many(documentChunk),
-    importJob: helpers.one(importJob, {
-      references: [importJob.id],
-      fields: [document.importJobId],
-    }),
   };
 });
 
@@ -136,6 +130,55 @@ export const serverRelations = relations(server, (helpers) => {
     project: helpers.one(project, {
       references: [project.id],
       fields: [server.projectId],
+    }),
+  };
+});
+
+/**
+ * Defines the relationships between the `prompt` table and other tables.
+ */
+export const promptRelations = relations(prompt, (helpers) => {
+  return {
+    /**
+     * A prompt can have multiple versions.
+     */
+    versions: helpers.many(promptVersion),
+    /**
+     * A prompt can have one draft.
+     */
+    draft: helpers.one(promptDraft, {
+      fields: [prompt.id],
+      references: [promptDraft.promptId],
+    }),
+  };
+});
+
+/**
+ * Defines the relationships between the `prompt_version` table and other tables.
+ */
+export const promptVersionRelations = relations(promptVersion, (helpers) => {
+  return {
+    /**
+     * A version belongs to a prompt.
+     */
+    prompt: helpers.one(prompt, {
+      fields: [promptVersion.promptId],
+      references: [prompt.id],
+    }),
+  };
+});
+
+/**
+ * Defines the relationships between the `prompt_draft` table and other tables.
+ */
+export const promptDraftRelations = relations(promptDraft, (helpers) => {
+  return {
+    /**
+     * A draft belongs to a prompt.
+     */
+    prompt: helpers.one(prompt, {
+      fields: [promptDraft.promptId],
+      references: [prompt.id],
     }),
   };
 });

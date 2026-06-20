@@ -335,12 +335,6 @@ if (!gotTheLock) {
           logger.error("Failed to init embedder:", error);
         });
 
-      Container.inject(DocumentManager)
-        .init()
-        .catch((error) => {
-          logger.error("Failed to init document manager:", error);
-        });
-
       Container.inject(Updater)
         .checkForUpdates()
         .catch((error) => {

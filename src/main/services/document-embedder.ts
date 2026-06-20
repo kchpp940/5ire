@@ -143,9 +143,6 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
       };
     });
 
-    this.#emitter.emit("document-process-started", { id, url });
-    this.#emitter.emit("document-stage-changed", { id, stage: "extracting", progress: 0 });
-
     logger.info(`Processing document "${url}"`);
 
     return (
@@ -165,8 +162,6 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
             };
           });
 
-          this.#emitter.emit("document-stage-changed", { id, stage: "embedding", progress: 0 });
-
           const file = join(tmpdir(), crypto.randomUUID());
           const stream = createWriteStream(file);
 
@@ -181,19 +176,12 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
 
             processed += 1;
 
-            const embeddingProgress = processed / texts.length;
             this.update((draft) => {
               draft.processingDocuments[id] = {
                 controller: controller,
                 status: "embedding",
-                progress: embeddingProgress,
+                progress: processed / texts.length,
               };
-            });
-
-            this.#emitter.emit("document-progress-updated", {
-              id,
-              stage: "embedding",
-              progress: embeddingProgress,
             });
 
             await new Promise((resolve) => setTimeout(resolve, 10));
@@ -225,8 +213,6 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
             };
           });
 
-          this.#emitter.emit("document-stage-changed", { id, stage: "saving", progress: 0 });
-
           let inserted = 0;
 
           const batch: { text: string; vector: number[] }[] = [];
@@ -253,19 +239,12 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
                 // Clear the batch after inserting
                 batch.length = 0;
                 // Update the progress
-                const savingProgress = inserted / result.length;
                 this.update((draft) => {
                   draft.processingDocuments[id] = {
                     controller: controller,
                     status: "saving",
-                    progress: savingProgress,
+                    progress: inserted / result.length,
                   };
-                });
-
-                this.#emitter.emit("document-progress-updated", {
-                  id,
-                  stage: "saving",
-                  progress: savingProgress,
                 });
               });
           };
@@ -296,8 +275,6 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
             })
             .where(eq(schema.document.id, id))
             .execute();
-
-          this.#emitter.emit("document-process-completed", { id, url });
         })
         // Error handling
         .catch(async (error) => {
@@ -453,79 +430,10 @@ export class DocumentEmbedder extends Stateful<DocumentEmbedder.State> {
 
 export namespace DocumentEmbedder {
   /**
-   * Document processing stage
-   */
-  export type ProcessingStage = "extracting" | "embedding" | "saving";
-
-  /**
    * Document embedder event definitions
    * Defines events that may be triggered during document embedding
    */
   export type Events = {
-    /**
-     * Document processing started event
-     * Triggered when a document is picked up from the queue and begins processing
-     */
-    "document-process-started": {
-      /**
-       * Document ID
-       */
-      id: string;
-      /**
-       * Document URL
-       */
-      url: string;
-    };
-    /**
-     * Document stage changed event
-     * Triggered when processing transitions to a new stage (extracting -> embedding -> saving)
-     */
-    "document-stage-changed": {
-      /**
-       * Document ID
-       */
-      id: string;
-      /**
-       * Current processing stage
-       */
-      stage: ProcessingStage;
-      /**
-       * Progress within the current stage (0-1)
-       */
-      progress: number;
-    };
-    /**
-     * Document progress updated event
-     * Triggered when the progress within the current stage changes
-     */
-    "document-progress-updated": {
-      /**
-       * Document ID
-       */
-      id: string;
-      /**
-       * Current processing stage
-       */
-      stage: ProcessingStage;
-      /**
-       * Progress within the current stage (0-1)
-       */
-      progress: number;
-    };
-    /**
-     * Document processing completed event
-     * Triggered when a document is fully processed and saved successfully
-     */
-    "document-process-completed": {
-      /**
-       * Document ID
-       */
-      id: string;
-      /**
-       * Document URL
-       */
-      url: string;
-    };
     /**
      * Document embedding failed event
      * Triggered when an error occurs during document embedding

@@ -26,7 +26,13 @@ import { useTranslation } from 'react-i18next';
 import usePromptStore from 'stores/usePromptStore';
 import { fillVariables, highlight, insertAtCursor } from 'utils/util';
 import { isNil, pick } from 'lodash';
-import { IChat, IChatContext, IPrompt, IPromptDef } from 'intellichat/types';
+import {
+  IChat,
+  IChatContext,
+  IPrompt,
+  IPromptDef,
+  IPromptVariableSchema,
+} from 'intellichat/types';
 import useChatStore from 'stores/useChatStore';
 import { IChatModelConfig } from 'providers/types';
 import PromptVariableDialog from '../PromptVariableDialog';
@@ -64,6 +70,14 @@ export default function PromptCtrl({
   const [variableDialogOpen, setVariableDialogOpen] = useState<boolean>(false);
   const [systemVariables, setSystemVariables] = useState<string[]>([]);
   const [userVariables, setUserVariables] = useState<string[]>([]);
+  const [systemVariableSchemasState, setSystemVariableSchemasState] = useState<
+    IPromptVariableSchema[]
+  >([]);
+  const [userVariableSchemasState, setUserVariableSchemasState] = useState<
+    IPromptVariableSchema[]
+  >([]);
+  const [systemMessageState, setSystemMessageState] = useState<string>('');
+  const [userMessageState, setUserMessageState] = useState<string>('');
   const [promptPickerOpen, setPromptPickerOpen] = useState<boolean>(false);
   const [pickedPrompt, setPickedPrompt] = useState<IPrompt | null>(null);
   const [model, setModel] = useState<IChatModelConfig>();
@@ -142,6 +156,10 @@ export default function PromptCtrl({
       ) {
         setPickedPrompt($prompt);
         setVariableDialogOpen(true);
+        setSystemVariableSchemasState(prompt.systemVariableSchemas || []);
+        setUserVariableSchemasState(prompt.userVariableSchemas || []);
+        setSystemMessageState(prompt.systemMessage || '');
+        setUserMessageState(prompt.userMessage || '');
       } else {
         const input = insertUserMessage(prompt.userMessage);
         await editStage(chat.id, { prompt: $prompt, input });
@@ -349,6 +367,10 @@ export default function PromptCtrl({
         open={variableDialogOpen}
         systemVariables={systemVariables}
         userVariables={userVariables}
+        systemVariableSchemas={systemVariableSchemasState}
+        userVariableSchemas={userVariableSchemasState}
+        systemMessage={systemMessageState}
+        userMessage={userMessageState}
         onCancel={onVariablesCancel}
         onConfirm={onVariablesConfirm}
       />

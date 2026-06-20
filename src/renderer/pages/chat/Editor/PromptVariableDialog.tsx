@@ -9,27 +9,25 @@ import {
   Field,
   Input,
   DialogActions,
+  Textarea,
+  InfoLabel,
+  Divider,
+  Text,
 } from '@fluentui/react-components';
-import { Dismiss24Regular } from '@fluentui/react-icons';
-import { useState } from 'react';
+import { Dismiss24Regular, Eye20Regular } from '@fluentui/react-icons';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { IPromptVariableSchema } from 'intellichat/types';
+import { fillVariables } from 'utils/util';
 
-/**
- * A dialog component for filling in prompt variables.
- * Displays input fields for system and user variables that can be filled by the user.
- * 
- * @param {Object} args - The component props
- * @param {boolean} args.open - Whether the dialog is open
- * @param {string[]} args.systemVariables - Array of system variable names to display
- * @param {string[]} args.userVariables - Array of user variable names to display
- * @param {Function} args.onCancel - Callback function called when dialog is cancelled
- * @param {Function} args.onConfirm - Callback function called when user confirms with filled variables
- * @returns {JSX.Element} The rendered dialog component
- */
 export default function PromptVariableDialog(args: {
   open: boolean;
   systemVariables: string[];
   userVariables: string[];
+  systemVariableSchemas?: IPromptVariableSchema[];
+  userVariableSchemas?: IPromptVariableSchema[];
+  systemMessage?: string;
+  userMessage?: string;
   onCancel: () => void;
   onConfirm: (
     systemVars: { [key: string]: string },
@@ -37,44 +35,77 @@ export default function PromptVariableDialog(args: {
   ) => void;
 }) {
   const { t } = useTranslation();
-  const { open, systemVariables, userVariables, onCancel, onConfirm } = args;
+  const {
+    open,
+    systemVariables,
+    userVariables,
+    systemVariableSchemas = [],
+    userVariableSchemas = [],
+    systemMessage = '',
+    userMessage = '',
+    onCancel,
+    onConfirm,
+  } = args;
 
   const [systemVars, setSystemVars] = useState<{ [key: string]: string }>({});
   const [userVars, setUserVars] = useState<{ [key: string]: string }>({});
+  const [showPreview, setShowPreview] = useState(false);
 
-  /**
-   * Handles changes to system variable input fields.
-   * 
-   * @param {string} key - The variable name/key
-   * @param {string} value - The new value for the variable
-   */
+  useEffect(() => {
+    if (open) {
+      const defaults: { [key: string]: string } = {};
+      systemVariableSchemas.forEach((s) => {
+        if (s.defaultValue) defaults[s.name] = s.defaultValue;
+      });
+      setSystemVars(defaults);
+    }
+  }, [open, systemVariableSchemas]);
+
+  useEffect(() => {
+    if (open) {
+      const defaults: { [key: string]: string } = {};
+      userVariableSchemas.forEach((s) => {
+        if (s.defaultValue) defaults[s.name] = s.defaultValue;
+      });
+      setUserVars(defaults);
+    }
+  }, [open, userVariableSchemas]);
+
+  const getSystemSchema = (name: string): IPromptVariableSchema | undefined => {
+    return systemVariableSchemas.find((s) => s.name === name);
+  };
+
+  const getUserSchema = (name: string): IPromptVariableSchema | undefined => {
+    return userVariableSchemas.find((s) => s.name === name);
+  };
+
   const onSystemVariesChange = (key: string, value: string) => {
     setSystemVars({ ...systemVars, [key]: value });
   };
 
-  /**
-   * Handles changes to user variable input fields.
-   * 
-   * @param {string} key - The variable name/key
-   * @param {string} value - The new value for the variable
-   */
   const onUserVariesChange = (key: string, value: string) => {
     setUserVars({ ...userVars, [key]: value });
   };
 
-  /**
-   * Handles the confirm action by calling the onConfirm callback with current variable values
-   * and resetting the internal state.
-   */
   const handleConfirm = () => {
     onConfirm(systemVars, userVars);
     setSystemVars({});
     setUserVars({});
   };
 
+  const previewSystemMessage = useMemo(() => {
+    return fillVariables(systemMessage, systemVars);
+  }, [systemMessage, systemVars]);
+
+  const previewUserMessage = useMemo(() => {
+    return fillVariables(userMessage, userVars);
+  }, [userMessage, userVars]);
+
+  if (!open) return null;
+
   return (
     <Dialog open={open}>
-      <DialogSurface>
+      <DialogSurface style={{ maxWidth: 720 }}>
         <DialogBody>
           <DialogTitle
             action={
@@ -99,15 +130,29 @@ export default function PromptVariableDialog(args: {
                     {t('Common.Variables')}
                   </div>
                   {systemVariables.map((variable) => {
+                    const schema = getSystemSchema(variable);
                     return (
                       <Field
-                        label={variable}
+                        label={
+                          <InfoLabel info={schema?.description}>
+                            {variable}
+                            {schema?.required && (
+                              <span className="text-colorPaletteRedBackground1">
+                                {' '}
+                                *
+                              </span>
+                            )}
+                          </InfoLabel>
+                        }
                         key={`system-var-${variable}`}
                         className="my-2"
                       >
-                        <Input
+                        <Textarea
                           className="w-full"
                           value={systemVars[variable] || ''}
+                          placeholder={
+                            schema?.defaultValue || t('Common.Required')
+                          }
                           onChange={(e) =>
                             onSystemVariesChange(variable, e.target.value || '')
                           }
@@ -120,19 +165,33 @@ export default function PromptVariableDialog(args: {
               {userVariables.length ? (
                 <div>
                   <div className="text-base font-medium">
-                    {t('User Message')}
+                    {t('Common.UserMessage')}
                     {t('Common.Variables')}
                   </div>
                   {userVariables.map((variable) => {
+                    const schema = getUserSchema(variable);
                     return (
                       <Field
-                        label={variable}
+                        label={
+                          <InfoLabel info={schema?.description}>
+                            {variable}
+                            {schema?.required && (
+                              <span className="text-colorPaletteRedBackground1">
+                                {' '}
+                                *
+                              </span>
+                            )}
+                          </InfoLabel>
+                        }
                         key={`user-var-${variable}`}
                         className="my-2"
                       >
-                        <Input
+                        <Textarea
                           className="w-full"
                           value={userVars[variable] || ''}
+                          placeholder={
+                            schema?.defaultValue || t('Common.Required')
+                          }
                           onChange={(e) =>
                             onUserVariesChange(variable, e.target.value || '')
                           }
@@ -142,6 +201,42 @@ export default function PromptVariableDialog(args: {
                   })}
                 </div>
               ) : null}
+              <div className="mt-4">
+                <Button
+                  appearance="subtle"
+                  icon={<Eye20Regular />}
+                  onClick={() => setShowPreview(!showPreview)}
+                >
+                  {showPreview
+                    ? t('Prompt.HidePreview')
+                    : t('Prompt.ShowPreview')}
+                </Button>
+              </div>
+              {showPreview && (
+                <div className="mt-4">
+                  <Divider>{t('Common.Preview')}</Divider>
+                  {systemMessage && (
+                    <div className="mt-3">
+                      <Text size={200} className="text-color-secondary block mb-1">
+                        {t('Common.SystemMessage')}:
+                      </Text>
+                      <div className="p-3 bg-colorNeutralBackground3 rounded whitespace-pre-wrap">
+                        {previewSystemMessage}
+                      </div>
+                    </div>
+                  )}
+                  {userMessage && (
+                    <div className="mt-3">
+                      <Text size={200} className="text-color-secondary block mb-1">
+                        {t('Common.UserMessage')}:
+                      </Text>
+                      <div className="p-3 bg-colorNeutralBackground3 rounded whitespace-pre-wrap">
+                        {previewUserMessage}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </DialogContent>
           <DialogActions>
