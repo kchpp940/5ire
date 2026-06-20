@@ -983,6 +983,7 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
 
   /**
    * Move a document to a different collection
+   * Creates a new ImportJob in the target collection and transfers the document
    * @param options Options containing document ID and target collection ID
    * @returns Promise<void>
    */
@@ -993,11 +994,15 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
 
     logger.info(`Moving document "${options.documentId}" to collection "${options.collectionId}"`);
 
-    return client.transaction(async (tx) => {
+    const [docRow, collectionRow, createdJob] = await client.transaction(async (tx) => {
       const document = await tx
         .select({
           id: schema.document.id,
+          name: schema.document.name,
           url: schema.document.url,
+          size: schema.document.size,
+          mimetype: schema.document.mimetype,
+          importJobId: schema.document.importJobId,
         })
         .from(schema.document)
         .where(eq(schema.document.id, options.documentId))
@@ -1008,8 +1013,13 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
       }
 
       const targetCollection = await tx
-        .$count(schema.collection, eq(schema.collection.id, options.collectionId))
-        .then((count) => count > 0);
+        .select({
+          id: schema.collection.id,
+          name: schema.collection.name,
+        })
+        .from(schema.collection)
+        .where(eq(schema.collection.id, options.collectionId))
+        .then((result) => result[0]);
 
       if (!targetCollection) {
         throw new Error("Target collection does not exist.");
@@ -1026,16 +1036,82 @@ export class DocumentManager extends Stateful<DocumentManager.State> {
         throw new Error("Document already exists in target collection.");
       }
 
+      const [createdJob] = await tx
+        .insert(schema.importJob)
+        .values({
+          collectionId: options.collectionId,
+          collectionName: targetCollection.name,
+          status: "processing",
+        })
+        .returning()
+        .execute();
+
       await tx
         .update(schema.document)
         .set({
           collectionId: options.collectionId,
+          importJobId: createdJob.id,
           status: "pending",
           error: null,
         })
         .where(eq(schema.document.id, options.documentId))
         .execute();
+
+      return [document, targetCollection, createdJob] as const;
     });
+
+    this.#ensureListeners();
+
+    const newDoc: DocumentManager.ImportJobDocument = {
+      id: docRow.id,
+      name: docRow.name,
+      url: docRow.url,
+      size: docRow.size,
+      mimetype: docRow.mimetype,
+      status: "pending",
+      stage: null,
+      progress: 0,
+      error: null,
+    };
+
+    const newJob: DocumentManager.ImportJob = {
+      id: createdJob.id,
+      collectionId: collectionRow.id,
+      collectionName: collectionRow.name,
+      createTime: createdJob.createTime,
+      updateTime: createdJob.updateTime,
+      status: "processing",
+      documents: { [docRow.id]: newDoc },
+      pendingCount: 1,
+      processingCount: 0,
+      completedCount: 0,
+      failedCount: 0,
+      progress: 0,
+    };
+
+    this.update((draft) => {
+      if (docRow.importJobId && draft.importJobs[docRow.importJobId]) {
+        const oldJob = draft.importJobs[docRow.importJobId];
+        delete oldJob.documents[docRow.id];
+        const oldStats = this.#calcJobStatsFromDocs(oldJob.documents);
+        oldJob.pendingCount = oldStats.pendingCount;
+        oldJob.processingCount = oldStats.processingCount;
+        oldJob.completedCount = oldStats.completedCount;
+        oldJob.failedCount = oldStats.failedCount;
+        oldJob.progress = oldStats.progress;
+        const oldTotal = Object.keys(oldJob.documents).length;
+        if (oldTotal === 0 || oldStats.completedCount + oldStats.failedCount === oldTotal) {
+          const oldNewStatus = oldStats.failedCount > 0 ? "completed_with_errors" : "completed";
+          oldJob.status = oldNewStatus;
+          this.#syncJobStatusToDatabase(oldJob.id, oldNewStatus);
+        }
+        oldJob.updateTime = new Date();
+      }
+
+      draft.importJobs[newJob.id] = newJob;
+    });
+
+    this.#emitter.emit("import-job-created", { jobId: newJob.id });
   }
 
   /**
